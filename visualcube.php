@@ -477,12 +477,34 @@
 			}
 		}
 
-		// Retrieve default arrow colour
-		$ac = $GREY;
+		// Retrieve default arrow colour (default: pale warm yellow to match reference style)
+		$ac = 'ff00ff';
 		if(array_key_exists('ac', $_REQUEST)){
 			$ac_ = parse_col($_REQUEST['ac']);
 			if($ac_ && $ac_ != 't') $ac = $ac_;
 		}
+
+		// Retrieve move rotation arrow defn's (e.g. move=U,Rprime,x)
+		$move_arrows = Array();
+		if(array_key_exists('move', $_REQUEST)){
+			$mstr = preg_split('/,/', $_REQUEST['move']);
+			foreach($mstr as $m){
+				$m = trim($m);
+				if($m === '') continue;
+				$ma = parse_move($m, $ac);
+				if($ma) $move_arrows[] = $ma;
+			}
+		}
+
+		// Arrow curvature: arrowbulge=0.0 (flat) to 1.0 (very curved), default 0.5
+		$arrow_bulge = 0.5;
+		if(array_key_exists('arrowbulge', $_REQUEST)){
+			$ab = floatval($_REQUEST['arrowbulge']);
+			$arrow_bulge = max(0.0, min(1.0, $ab));
+		}
+
+		// Arrow highlight: on by default; arrowhl=0 disables the 3D sheen effect
+		$arrow_hl = !(array_key_exists('arrowhl', $_REQUEST) && $_REQUEST['arrowhl'] == '0');
 
 		// ---------------[ 3D Cube Generator properties ]---------------
 
@@ -611,6 +633,13 @@
 				$cube .= gen_arrow($i, $a[0], $a[1], $a[2], $a[4], array_key_exists(3, $a)?$a[3]:$ac);
 			}
 			$cube .= "\t</g>\n";
+		}
+
+		// Draw move rotation arrows
+		if(!empty($move_arrows)){
+			foreach($move_arrows as $ma){
+				$cube .= gen_move_arrow($ma[0], $ma[1], $ma[2], $ma[3], $arrow_bulge, $arrow_hl);
+			}
 		}
 
 		$cube .= "</svg>\n";
@@ -872,6 +901,260 @@
 		<path transform=" translate('.$p2[0].','.$p2[1].') scale('.(0.033 / $dim).') rotate('.$rt.')"
 			d="M 5.77,0.0 L -2.88,5.0 L -2.88,-5.0 L 5.77,0.0 z"
 			style="fill:#'.$col.';stroke-width:0;stroke-linejoin:round"/>'."\n";
+	}
+
+	/**
+	 * Parse a move string into [face_id, ccw, color].
+	 * Supports: U D R L F B u d r l f b M E S x y z
+	 * Suffix: prime or ' = CCW, 2 = double (returns both CW entries), nothing = CW
+	 * Returns null if unrecognised.
+	 */
+	function parse_move($str, $default_col = null){
+		global $U, $R, $F, $D, $L, $B, $GREY;
+
+		// Normalise: replace 'prime' suffix with apostrophe
+		$str = preg_replace('/prime/i', "'", $str);
+
+		// Extract optional colour after '-'
+		$col = $default_col !== null ? $default_col : $GREY;
+		if(preg_match('/^(.+)-(.+)$/', $str, $cm)){
+			$c = parse_col($cm[2]);
+			if($c){ $col = $c; $str = $cm[1]; }
+		}
+
+		// Determine double move
+		$double = false;
+		if(substr($str, -1) === '2'){ $double = true; $str = substr($str, 0, -1); }
+
+		// Determine CCW (prime)
+		$ccw = false;
+		if(substr($str, -1) === "'"){  $ccw = true;  $str = substr($str, 0, -1); }
+
+		// Map move letter(s) to face and canonical direction
+		// Each entry: [face_id, flip_ccw]
+		// flip_ccw=true means the "standard CW" for that face looks CCW visually on that face
+		$map = Array(
+			'U'  => Array($U, false),
+			'u'  => Array($U, false),
+			'Uw' => Array($U, false),
+			'D'  => Array($D, true),
+			'd'  => Array($D, true),
+			'Dw' => Array($D, true),
+			'R'  => Array($R, false),
+			'r'  => Array($R, false),
+			'Rw' => Array($R, false),
+			'L'  => Array($L, false),
+			'l'  => Array($L, false),
+			'Lw' => Array($L, false),
+			'F'  => Array($F, false),
+			'f'  => Array($F, false),
+			'Fw' => Array($F, false),
+			'B'  => Array($B, true),
+			'b'  => Array($B, true),
+			'Bw' => Array($B, true),
+			'M'  => Array($L, true),
+			'E'  => Array($D, true),
+			'S'  => Array($F, false),
+			'x'  => Array($R, false),
+			'y'  => Array($U, false),
+			'z'  => Array($F, false),
+		);
+
+		if(!array_key_exists($str, $map)) return null;
+		$face    = $map[$str][0];
+		$flip    = $map[$str][1];
+		// XOR: if face is naturally flipped AND user asked for CCW, result is CW, etc.
+		$final_ccw = $ccw XOR $flip;
+
+		if($double){
+			// For double moves, return two CW arrows  (convention: show two arcs)
+			return Array($face, false, $col, true); // 4th element signals double
+		}
+		return Array($face, $final_ccw, $col, false);
+	}
+
+	/**
+	 * Generates a fat rotation arc arrow SVG for a face move.
+	 * Uses a quadratic bezier curve whose endpoints are the midpoints of the two
+	 * "lateral" face edges (perpendicular to the outward normal), with a control
+	 * point pushed outward to create the arc bulge.
+	 */
+	function gen_move_arrow($face, $ccw, $col, $double = false, $bulge = 0.5, $hl = false){
+		global $p, $dim, $rv, $U, $R, $F, $D, $L, $B;
+
+		if($col == 't') return '';
+
+		$back_face = ($face == $D || $face == $L || $face == $B);
+
+		// Use each face's own projected corners for all faces.
+		$cx = 0; $cy = 0;
+		$corners = Array(
+			$p[$face][0][0],
+			$p[$face][$dim][0],
+			$p[$face][$dim][$dim],
+			$p[$face][0][$dim],
+		);
+		foreach($corners as $c){ $cx += $c[0]; $cy += $c[1]; }
+		$cx /= 4; $cy /= 4;
+
+		// Outward unit normal: from cube screen-centre toward face centre.
+		$nlen = sqrt($cx*$cx + $cy*$cy);
+		if($nlen < 0.001){ $nx = 0; $ny = -1; }
+		else { $nx = $cx / $nlen;  $ny = $cy / $nlen; }
+
+		// Lateral unit vector (perpendicular to normal, 90° CCW).
+		$lx = -$ny;  $ly = $nx;
+
+		// Find the most-outward corner in the outward normal direction.
+		$out_vals = array();
+		foreach($corners as $i => $c){
+			$out_vals[$i] = ($c[0]-$cx)*$nx + ($c[1]-$cy)*$ny;
+		}
+		arsort($out_vals);
+		$keys = array_keys($out_vals);
+		$top_idx  = $keys[0];
+		$prev_idx = ($top_idx + 3) % 4;
+		$next_idx = ($top_idx + 1) % 4;
+		$c_top  = $corners[$top_idx];
+		$c_prev = $corners[$prev_idx];
+		$c_next = $corners[$next_idx];
+
+		// Arc endpoints = midpoints of the two edges adjacent to the peak corner.
+		$p_a = array(($c_top[0]+$c_prev[0])/2, ($c_top[1]+$c_prev[1])/2);
+		$p_b = array(($c_top[0]+$c_next[0])/2, ($c_top[1]+$c_next[1])/2);
+
+		// Sort: p_a = more negative lateral (left), p_b = more positive lateral (right)
+		$lat_a = ($p_a[0]-$cx)*$lx + ($p_a[1]-$cy)*$ly;
+		$lat_b = ($p_b[0]-$cx)*$lx + ($p_b[1]-$cy)*$ly;
+		if($lat_a > $lat_b){ $tmp=$p_a; $p_a=$p_b; $p_b=$tmp; }
+
+		// Chord length
+		$chord = sqrt(($p_b[0]-$p_a[0])*($p_b[0]-$p_a[0]) + ($p_b[1]-$p_a[1])*($p_b[1]-$p_a[1]));
+
+		// Bezier control point: bulge=0.0→0.05×chord (flat), bulge=1.0→0.60×chord (very curved)
+		$bulge_push = 0.05 + $bulge * 0.55;
+		$qx = $c_top[0] + $nx * $chord * $bulge_push;
+		$qy = $c_top[1] + $ny * $chord * $bulge_push;
+
+		// For a quadratic bezier Q ctrl end, the tangent at the end is (end - ctrl).
+		// CW: p_a (left) → p_b (right),  CCW: p_b → p_a
+		if(!$ccw){
+			$sx = $p_a[0]; $sy = $p_a[1];
+			$ex = $p_b[0]; $ey = $p_b[1];
+		} else {
+			$sx = $p_b[0]; $sy = $p_b[1];
+			$ex = $p_a[0]; $ey = $p_a[1];
+		}
+
+		// Tangent at endpoint = endpoint - control point (quadratic bezier tangent)
+		$tx = $ex - $qx;  $ty = $ey - $qy;
+		$tlen = sqrt($tx*$tx + $ty*$ty);
+		if($tlen > 1e-9){ $tx /= $tlen; $ty /= $tlen; }
+
+		// Stroke width and arrowhead proportional to chord
+		$sw       = $chord * 0.09;
+		$head_len = $chord * 0.22;
+		$head_w   = $chord * 0.11;
+
+		$svg = "\t\t<!-- move arrow face=$face -->\n";
+
+		if($double){
+			// Two concentric arcs, both outside the face — inner and outer.
+			// Spread the two arcs symmetrically around the bulge push
+			$spread = $chord * 0.20;
+			$base_push = 0.05 + $bulge * 0.55;
+			$qx_in  = $c_top[0] + $nx * ($chord * $base_push - $spread * 0.5);
+			$qy_in  = $c_top[1] + $ny * ($chord * $base_push - $spread * 0.5);
+			$qx_out = $c_top[0] + $nx * ($chord * $base_push + $spread * 0.5);
+			$qy_out = $c_top[1] + $ny * ($chord * $base_push + $spread * 0.5);
+			// Tangents for each
+			$tx_in = $ex - $qx_in; $ty_in = $ey - $qy_in;
+			$tl = sqrt($tx_in*$tx_in+$ty_in*$ty_in);
+			if($tl>1e-9){$tx_in/=$tl;$ty_in/=$tl;}
+			$tx_out = $ex - $qx_out; $ty_out = $ey - $qy_out;
+			$tl = sqrt($tx_out*$tx_out+$ty_out*$ty_out);
+			if($tl>1e-9){$tx_out/=$tl;$ty_out/=$tl;}
+			// Draw inner arc (no arrowhead), outer arc (with arrowhead)
+			$svg .= gen_move_arrow_bez($sx, $sy, $qx_in,  $qy_in,  $ex, $ey, $sw, $col, $tx_in,  $ty_in,  0,          0,         $hl);
+			$svg .= gen_move_arrow_bez($sx, $sy, $qx_out, $qy_out, $ex, $ey, $sw, $col, $tx_out, $ty_out, $head_len, $head_w, $hl);
+			return $svg;
+		}
+
+		$svg .= gen_move_arrow_bez($sx, $sy, $qx, $qy, $ex, $ey, $sw, $col, $tx, $ty, $head_len, $head_w, $hl);
+
+		return $svg;
+	}
+
+	/** Helper: draws one bezier arc segment with optional arrowhead and highlight effect */
+	function gen_move_arrow_bez($sx, $sy, $qx, $qy, $ex, $ey, $sw, $col, $tx, $ty, $head_len, $head_w, $hl = false){
+		$has_head = ($head_len > 0 && $head_w > 0);
+		$travel = atan2($ty, $tx);
+		$perp   = $travel + M_PI/2;
+
+		$out = '';
+
+		if($hl){
+			// --- Highlight effect: dark thick outline, then lighter thinner overlay ---
+			// Parse base color
+			$r = hexdec(substr($col, 0, 2));
+			$g = hexdec(substr($col, 2, 2));
+			$b = hexdec(substr($col, 4, 2));
+			// Dark outline color: mix 30% of original + 70% black
+			$dr = (int)round($r * 0.30);
+			$dg = (int)round($g * 0.30);
+			$db = (int)round($b * 0.30);
+			$dark_col = sprintf('%02x%02x%02x', $dr, $dg, $db);
+			// Light overlay color: mix 60% original + 40% white
+			$lr = (int)round($r * 0.60 + 255 * 0.40);
+			$lg = (int)round($g * 0.60 + 255 * 0.40);
+			$lb = (int)round($b * 0.60 + 255 * 0.40);
+			$light_col = sprintf('%02x%02x%02x', $lr, $lg, $lb);
+
+			$sw_outline = $sw * 2.0;
+			$sw_inner   = $sw * 1.0;
+
+			// Pass 1: thick black outline
+			$out .= "\t\t<path d=\"M {$sx},{$sy} Q {$qx},{$qy} {$ex},{$ey}\"\n";
+			$out .= "\t\t\tstyle=\"fill:none;stroke:#000000;stroke-width:{$sw_outline};stroke-linecap:round;stroke-opacity:1\"/>\n";
+			if($has_head){
+				$tip_x = $ex + $tx * $head_len * 1.15;
+				$tip_y = $ey + $ty * $head_len * 1.15;
+				$b1x = $ex + cos($perp)*$head_w*1.4;  $b1y = $ey + sin($perp)*$head_w*1.4;
+				$b2x = $ex - cos($perp)*$head_w*1.4;  $b2y = $ey - sin($perp)*$head_w*1.4;
+				$out .= "\t\t<polygon points=\"{$tip_x},{$tip_y} {$b1x},{$b1y} {$b2x},{$b2y}\"\n";
+				$out .= "\t\t\tstyle=\"fill:#000000;stroke:none;opacity:1\"/>\n";
+			}
+
+			// Pass 2: thinner light overlay on top
+			$out .= "\t\t<path d=\"M {$sx},{$sy} Q {$qx},{$qy} {$ex},{$ey}\"\n";
+			$out .= "\t\t\tstyle=\"fill:none;stroke:#{$col};stroke-width:{$sw_inner};stroke-linecap:round;stroke-opacity:1\"/>\n";
+			if($has_head){
+				$tip_x = $ex + $tx * $head_len;
+				$tip_y = $ey + $ty * $head_len;
+				$b1x = $ex + cos($perp)*$head_w;  $b1y = $ey + sin($perp)*$head_w;
+				$b2x = $ex - cos($perp)*$head_w;  $b2y = $ey - sin($perp)*$head_w;
+				$out .= "\t\t<polygon points=\"{$tip_x},{$tip_y} {$b1x},{$b1y} {$b2x},{$b2y}\"\n";
+				$out .= "\t\t\tstyle=\"fill:#{$col};stroke:none;opacity:1\"/>\n";
+			}
+
+			// Pass 3: thin light sheen streak on top (upper-left-ish)
+			$out .= "\t\t<path d=\"M {$sx},{$sy} Q {$qx},{$qy} {$ex},{$ey}\"\n";
+			$out .= "\t\t\tstyle=\"fill:none;stroke:#{$light_col};stroke-width:" . ($sw_inner * 0.35) . ";stroke-linecap:round;stroke-opacity:0.75\"/>\n";
+		} else {
+			// --- Standard rendering ---
+			$out .= "\t\t<path d=\"M {$sx},{$sy} Q {$qx},{$qy} {$ex},{$ey}\"\n";
+			$out .= "\t\t\tstyle=\"fill:none;stroke:#{$col};stroke-width:{$sw};stroke-linecap:round;stroke-opacity:1\"/>\n";
+			if($has_head){
+				$tip_x = $ex + $tx * $head_len;
+				$tip_y = $ey + $ty * $head_len;
+				$b1x = $ex + cos($perp)*$head_w;  $b1y = $ey + sin($perp)*$head_w;
+				$b2x = $ex - cos($perp)*$head_w;  $b2y = $ey - sin($perp)*$head_w;
+				$out .= "\t\t<polygon points=\"{$tip_x},{$tip_y} {$b1x},{$b1y} {$b2x},{$b2y}\"\n";
+				$out .= "\t\t\tstyle=\"fill:#{$col};stroke:none;opacity:1\"/>\n";
+			}
+		}
+
+		return $out;
 	}
 
 	/** Converts svg into given format */
