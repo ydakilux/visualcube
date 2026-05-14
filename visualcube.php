@@ -462,7 +462,7 @@
 			if(array_key_exists('alg', $_REQUEST)) $alg = $_REQUEST['alg']; else $alg = $DEFAULTS['alg'];
 			if(array_key_exists('case', $_REQUEST)) $case = $_REQUEST['case']; else $case = $DEFAULTS['case'];
 			$alg = fcs_format_alg(urldecode($alg));
-			$case = invert_alg(fcs_format_alg(urldecode($case)));
+			$case = fcs_format_alg(urldecode($case));
 //			$facelets = facelet_cube(case_cube($alg), $dim, $facelets); // old 3x3 alg system
 			$facelets = fcs_doperm($facelets, $case . ' ' . $alg, $dim); // new NxN facelet permute
 		}
@@ -478,7 +478,7 @@
 		}
 
 		// Retrieve default arrow colour (default: pale warm yellow to match reference style)
-		$ac = 'ff00ff';
+		$ac = '808080';
 		if(array_key_exists('ac', $_REQUEST)){
 			$ac_ = parse_col($_REQUEST['ac']);
 			if($ac_ && $ac_ != 't') $ac = $ac_;
@@ -638,8 +638,63 @@
 		// Draw move rotation arrows
 		if(!empty($move_arrows)){
 			foreach($move_arrows as $ma){
-				$cube .= gen_move_arrow($ma[0], $ma[1], $ma[2], $ma[3], $arrow_bulge, $arrow_hl);
+				$cube .= gen_move_arrow($ma[0], $ma[1], $ma[2], $ma[3], $arrow_bulge, $arrow_hl, isset($ma[4]) ? $ma[4] : '');
 			}
+		}
+
+		// Debug overlay: number each sticker on each visible face.
+		// Use ?numbered=1 (or =U, =UFR, etc.) to enable.
+		//   1..d² per face, numbered row-major in $p[face][r][c] indexing
+		//   with r ∈ [0..d-1] (row index of sticker) and c ∈ [0..d-1] (col index).
+		//   Sticker (r,c) centre is at the centroid of the four corner points
+		//   p[face][r][c], p[face][r+1][c], p[face][r+1][c+1], p[face][r][c+1].
+		// Sticker numbering overlay
+		//   ?numbers=1            -> show face letter + digit (F1, F2 ...) on all visible faces
+		//   ?numbers=UFR          -> only the listed faces (case-insensitive)
+		//   ?numbers=0 (or absent)-> disabled
+		//   Legacy alias: ?numbered=... still accepted.
+		$numbers_req = null;
+		if(array_key_exists('numbers',  $_REQUEST)) $numbers_req = $_REQUEST['numbers'];
+		elseif(array_key_exists('numbered', $_REQUEST)) $numbers_req = $_REQUEST['numbered'];
+		if($numbers_req !== null && $numbers_req !== '' && $numbers_req !== '0' && strtolower($numbers_req) !== 'false'){
+			$which = strtoupper($numbers_req);
+			if($which === '1' || $which === 'TRUE') $which = 'UFRLBD';
+			$face_letter = array($U=>'U', $R=>'R', $F=>'F', $D=>'D', $L=>'L', $B=>'B');
+			$cube .= "\t<g>\n";
+			foreach($face_letter as $fid => $letter){
+				if(strpos($which, $letter) === false) continue;
+				if(!face_visible($fid, $rv)) continue;
+				$n = 1;
+				for($r = 0; $r < $dim; $r++){
+					for($c = 0; $c < $dim; $c++){
+						$p00 = $p[$fid][$r  ][$c  ];
+						$p10 = $p[$fid][$r+1][$c  ];
+						$p11 = $p[$fid][$r+1][$c+1];
+						$p01 = $p[$fid][$r  ][$c+1];
+						$cx_s = ($p00[0]+$p10[0]+$p11[0]+$p01[0]) / 4;
+						$cy_s = ($p00[1]+$p10[1]+$p11[1]+$p01[1]) / 4;
+						$ed1 = sqrt(($p10[0]-$p00[0])*($p10[0]-$p00[0]) + ($p10[1]-$p00[1])*($p10[1]-$p00[1]));
+						$ed2 = sqrt(($p01[0]-$p00[0])*($p01[0]-$p00[0]) + ($p01[1]-$p00[1])*($p01[1]-$p00[1]));
+						$ed = ($ed1 + $ed2) / 2;
+						$radius = $ed * 0.34;          // a bit bigger to fit letter+digit
+						$fs     = $ed * 0.38;
+						// Two separate <text> elements (each a single ASCII glyph) so the
+						// PNG rasterizer's font fallback handles each glyph independently.
+						$gap   = $fs * 0.05;
+						$x_let = $cx_s - $fs * 0.30 + $gap * 0;
+						$x_dig = $cx_s + $fs * 0.30 - $gap * 0;
+						$ty    = $cy_s + $fs * 0.35;   // baseline offset
+						$cube .= sprintf("\t\t<circle cx='%.4f' cy='%.4f' r='%.4f' fill='#ffffff' stroke='#000000' stroke-width='%.4f'/>\n",
+							$cx_s, $cy_s, $radius, $ed * 0.025);
+						$cube .= sprintf("\t\t<text x='%.4f' y='%.4f' font-size='%.4f' font-family='Arial,sans-serif' font-weight='bold' text-anchor='middle' fill='#000000' stroke='none'>%s</text>\n",
+							$x_let, $ty, $fs, $letter);
+						$cube .= sprintf("\t\t<text x='%.4f' y='%.4f' font-size='%.4f' font-family='Arial,sans-serif' font-weight='bold' text-anchor='middle' fill='#000000' stroke='none'>%d</text>\n",
+							$x_dig, $ty, $fs, $n);
+						$n++;
+					}
+				}
+			}
+			$cube .= "\t</g>\n";
 		}
 
 		$cube .= "</svg>\n";
@@ -966,11 +1021,15 @@
 		// XOR: if face is naturally flipped AND user asked for CCW, result is CW, etc.
 		$final_ccw = $ccw XOR $flip;
 
+		// 5th element: the bare move token (no prime / no double / no colour).
+		// Used by gen_move_arrow to dispatch rotation moves (x/y/z/M/E/S) and
+		// wide moves (u/d/r/l/f/b, Uw/Dw/...) to their own arrow styles.
+		$kind = $str;
+
 		if($double){
-			// For double moves, return two CW arrows  (convention: show two arcs)
-			return Array($face, false, $col, true); // 4th element signals double
+			return Array($face, false, $col, true, $kind);
 		}
-		return Array($face, $final_ccw, $col, false);
+		return Array($face, $final_ccw, $col, false, $kind);
 	}
 
 	/**
@@ -979,10 +1038,2763 @@
 	 * "lateral" face edges (perpendicular to the outward normal), with a control
 	 * point pushed outward to create the arc bulge.
 	 */
-	function gen_move_arrow($face, $ccw, $col, $double = false, $bulge = 0.5, $hl = false){
+	/**
+	 * Draws a half-circle glass arrow lying flat on the U face.
+	 * The arc is parametrized in U-face local coordinates (u,v in [0,dim])
+	 * then bilinearly mapped to the projected face quadrilateral on screen.
+	 * Uses a single SVG path with cubic bezier curves for smooth edges.
+	 */
+	/**
+	 * D-move arrow: a glass-style arrow that runs along the bottom row of the F face
+	 * and continues onto the bottom row of the R face, indicating the direction the
+	 * bottom-row stickers travel during a D rotation.
+	 * D (CW)  → arrow points from F-bottom toward R-bottom (left → right across the bottom edge)
+	 * D' (CCW)→ reversed
+	 */
+	function gen_glass_d_wrap_arrow($ccw, $hl){
+		global $p, $dim, $F, $R, $U;
+
+		$d = $dim;
+		// 4-anchor smooth curved glass arrow for D move.
+		//   Anchors (sticker centres):
+		//     A0 = F3 = centre of F bottom-left sticker  (p[F][0][d-1])
+		//     A1 = F9 = centre of F bottom-right sticker (p[F][d-1][d-1])
+		//     A2 = R3 = centre of R bottom-back sticker  (p[R][0][d-1])
+		//     A3 = R6 = centre of R bottom-middle sticker(p[R][1][d-1])
+		//   Path goes A0 -> A1 -> A2 -> A3 (D CW); reversed for D'.
+		$sticker_centre = function($face, $r, $c) use (&$p){
+			$q00 = $p[$face][$r  ][$c  ];
+			$q10 = $p[$face][$r+1][$c  ];
+			$q11 = $p[$face][$r+1][$c+1];
+			$q01 = $p[$face][$r  ][$c+1];
+			return array(
+				($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+				($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+			);
+		};
+
+		$A0 = $sticker_centre($F, 0, $d - 1);        // F3
+		$A1 = $sticker_centre($F, $d - 1, $d - 1);   // F9
+		$A2 = $sticker_centre($R, 0, $d - 1);        // R3
+		$A3 = $sticker_centre($R, 1, $d - 1);        // R6
+
+		$anchors = array($A0, $A1, $A2, $A3);
+		if($ccw){
+			$anchors = array_reverse($anchors);
+		}
+
+		// Sticker width estimate (using U-face diagonal — matches U/L/R thickness)
+		$u_BL = $p[$U][0][0];
+		$u_FR = $p[$U][$d][$d];
+		$diag_f = sqrt(
+			($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+			($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+		);
+		$sticker_w = $diag_f / $d / 1.414;
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = $thick * 1.8;
+
+		// Centripetal Catmull-Rom sampling through anchors
+		$alpha = 0.5;
+		$cr_points = array();
+		$cr_points[] = $anchors[0];
+		foreach($anchors as $a) $cr_points[] = $a;
+		$cr_points[] = $anchors[count($anchors)-1];
+
+		$N_per_seg = 24;
+		$samples  = array();
+		$tangents = array();
+		$tj = function($ti, $pi, $pj) use ($alpha){
+			$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+			$dist = sqrt($dx*$dx + $dy*$dy);
+			if($dist < 1e-9) $dist = 1e-9;
+			return $ti + pow($dist, $alpha);
+		};
+		for($i = 0; $i < count($anchors) - 1; $i++){
+			$P0 = $cr_points[$i];
+			$P1 = $cr_points[$i+1];
+			$P2 = $cr_points[$i+2];
+			$P3 = $cr_points[$i+3];
+			$t0 = 0.0;
+			$t1 = $tj($t0, $P0, $P1);
+			$t2 = $tj($t1, $P1, $P2);
+			$t3 = $tj($t2, $P2, $P3);
+			$is_last = ($i == count($anchors) - 2);
+			$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+			for($k = 0; $k <= $last_k; $k++){
+				$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+				$A1c = array(
+					($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+					($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2c = array(
+					($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+					($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3c = array(
+					($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+					($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1c = array(
+					($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+					($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+				);
+				$B2c = array(
+					($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+					($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+				);
+				$C  = array(
+					($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+					($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+				);
+				$samples[] = $C;
+				$eps = ($t2 - $t1) * 1e-3;
+				$tp  = max($t1, min($t2, $t + $eps));
+				$A1d = array(
+					($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+					($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2d = array(
+					($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+					($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3d = array(
+					($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+					($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1d = array(
+					($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+					($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+				);
+				$B2d = array(
+					($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+					($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+				);
+				$Cd  = array(
+					($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+					($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+				);
+				$tx = $Cd[0] - $C[0];
+				$ty = $Cd[1] - $C[1];
+				$tl = sqrt($tx*$tx + $ty*$ty);
+				if($tl < 1e-9) $tl = 1;
+				$tangents[] = array($tx/$tl, $ty/$tl);
+			}
+		}
+		$N = count($samples) - 1;
+		$p_tip = $samples[$N];
+
+		$shaft_end_idx = $N;
+		for($k = $N; $k >= 0; $k--){
+			$dx = $p_tip[0] - $samples[$k][0];
+			$dy = $p_tip[1] - $samples[$k][1];
+			if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+		}
+		$tip_back     = $samples[$shaft_end_idx];
+		$tip_back_tan = $tangents[$shaft_end_idx];
+
+		$left_pts  = array();
+		$right_pts = array();
+		for($k = 0; $k <= $shaft_end_idx; $k++){
+			$nx = -$tangents[$k][1];
+			$ny =  $tangents[$k][0];
+			$bx = $samples[$k][0];
+			$by = $samples[$k][1];
+			$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+			$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+		}
+		$tn_x = -$tip_back_tan[1];
+		$tn_y =  $tip_back_tan[0];
+		$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+		$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+		$smooth = function($pts, $reverse = false){
+			$n = count($pts);
+			if($reverse) $pts = array_reverse($pts);
+			$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+			for($i = 1; $i < $n - 1; $i++){
+				$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+				$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+				$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+			}
+			$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+			return $s;
+		};
+
+		$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+		$path_d .= $smooth($left_pts);
+		$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1]);
+		$path_d .= " " . $smooth($right_pts, true);
+		$path_d .= " Z";
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- D glass curved arrow F3 -> F9 -> R3 -> R6 -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		$g_in = max(2, intval($N * 0.08));
+		$gs = $g_in;
+		$ge = max($gs, $shaft_end_idx - $g_in);
+		if($ge > $gs){
+			$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+			for($k = $gs+1; $k <= $ge; $k++){
+				$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+			}
+			$svg .= "\t\t<path d=\"{$g_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+		}
+
+		return $svg;
+	}
+
+	function angle_between($ax, $ay, $bx, $by){
+		$dot = $ax*$bx + $ay*$by;
+		$dot = max(-1.0, min(1.0, $dot));
+		return acos($dot);
+	}
+
+	/**
+	 * L/R move arrow: a glass-style vertical arrow drawn on the F face's left or
+	 * right column, indicating how the F-column stickers travel during the move.
+	 *
+	 * Convention:
+	 *   L  (CW from L's POV): F-left column stickers move DOWNWARD  (toward D)
+	 *   L' (CCW)            : F-left column stickers move UPWARD    (toward U)
+	 *   R  (CW from R's POV): F-right column stickers move UPWARD   (toward U)
+	 *   R' (CCW)            : F-right column stickers move DOWNWARD (toward D)
+	 *
+	 * Because F face is always fully visible in the default view, the arrow is
+	 * always visible regardless of whether L/R themselves are visible.
+	 *
+	 * @param string $side  'L' or 'R'
+	 * @param bool   $ccw   prime (counter-clockwise) variant
+	 * @param bool   $hl    highlight (currently unused, reserved)
+	 */
+	function gen_glass_lr_column_arrow($side, $ccw, $hl){
+		global $p, $dim, $F, $U;
+
+		$d = $dim;
+		// L variant: 4-anchor smooth curved glass arrow.
+		//   Anchors (sticker centres):
+		//     A0 = U1 = centre of U back-left corner sticker  (p[U][0][0] region)
+		//     A1 = U3 = centre of U front-left corner sticker (p[U][0][d-1] region)
+		//     A2 = F1 = centre of F top-left corner sticker   (p[F][0][0] region)
+		//     A3 = F2 = centre of F top-middle sticker        (p[F][0][1] region)
+		//   Path goes A0 -> A1 -> A2 -> A3 (L CW); reversed for L'.
+		if($side == 'L'){
+			// Helper: centre of sticker (r,c) on a face
+			$sticker_centre = function($face, $r, $c) use (&$p){
+				$q00 = $p[$face][$r  ][$c  ];
+				$q10 = $p[$face][$r+1][$c  ];
+				$q11 = $p[$face][$r+1][$c+1];
+				$q01 = $p[$face][$r  ][$c+1];
+				return array(
+					($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+					($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+				);
+			};
+
+			// Determine which (r,c) corresponds to each visual sticker.
+			// U face row-major: U1=(0,0), U2=(0,1), U3=(0,2), U4=(1,0), ...
+			// F face row-major: F1=(0,0), F2=(0,1), F3=(0,2), F4=(1,0), ...
+			$A0 = $sticker_centre($U, 0, 1);         // U2: U back-edge, second sticker
+			$A1 = $sticker_centre($U, 0, $d - 1);    // U3: front-left corner of U
+			$A2 = $sticker_centre($F, 0, 0);         // F1: top-left corner of F
+			$A3 = $sticker_centre($F, 0, $d - 1);    // F3: top-right corner of F
+
+			$anchors = array($A0, $A1, $A2, $A3);
+			if($ccw){
+				$anchors = array_reverse($anchors);
+			}
+
+			// Sticker width estimate (using diagonal of U face)
+			$u_BL = $p[$U][0][0];
+			$u_FR = $p[$U][$d][$d];
+			$diag_u = sqrt(
+				($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+				($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+			);
+			$sticker_w = $diag_u / $d / 1.414;
+			$thick    = $sticker_w * 0.55;
+			$half_t   = $thick / 2;
+			$head_w   = $thick * 1.6;
+			$head_len = $thick * 1.8;
+
+			// Sample a Catmull-Rom spline through the 4 anchors.
+			// Use centripetal Catmull-Rom (alpha=0.5) for stable curvature at corners.
+			$alpha = 0.5;
+			$cr_points = array();   // duplicate endpoints for endpoint tangents
+			$cr_points[] = $anchors[0];
+			foreach($anchors as $a) $cr_points[] = $a;
+			$cr_points[] = $anchors[count($anchors)-1];
+
+			$N_per_seg = 24;
+			$samples  = array();
+			$tangents = array();
+			$tj = function($ti, $pi, $pj) use ($alpha){
+				$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+				$dist = sqrt($dx*$dx + $dy*$dy);
+				if($dist < 1e-9) $dist = 1e-9;
+				return $ti + pow($dist, $alpha);
+			};
+			for($i = 0; $i < count($anchors) - 1; $i++){
+				$P0 = $cr_points[$i];
+				$P1 = $cr_points[$i+1];
+				$P2 = $cr_points[$i+2];
+				$P3 = $cr_points[$i+3];
+				$t0 = 0.0;
+				$t1 = $tj($t0, $P0, $P1);
+				$t2 = $tj($t1, $P1, $P2);
+				$t3 = $tj($t2, $P2, $P3);
+				$is_last = ($i == count($anchors) - 2);
+				$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+				for($k = 0; $k <= $last_k; $k++){
+					$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+					// Catmull-Rom (Barry-Goldman) value + derivative
+					$A1c = array(
+						($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+						($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+					);
+					$A2c = array(
+						($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+						($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+					);
+					$A3c = array(
+						($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+						($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+					);
+					$B1c = array(
+						($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+						($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+					);
+					$B2c = array(
+						($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+						($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+					);
+					$C  = array(
+						($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+						($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+					);
+					$samples[] = $C;
+					// Finite-difference tangent (cheap and good enough)
+					$eps = ($t2 - $t1) * 1e-3;
+					$tp  = max($t1, min($t2, $t + $eps));
+					$A1d = array(
+						($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+						($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+					);
+					$A2d = array(
+						($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+						($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+					);
+					$A3d = array(
+						($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+						($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+					);
+					$B1d = array(
+						($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+						($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+					);
+					$B2d = array(
+						($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+						($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+					);
+					$Cd  = array(
+						($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+						($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+					);
+					$tx = $Cd[0] - $C[0];
+					$ty = $Cd[1] - $C[1];
+					$tl = sqrt($tx*$tx + $ty*$ty);
+					if($tl < 1e-9) $tl = 1;
+					$tangents[] = array($tx/$tl, $ty/$tl);
+				}
+			}
+			$N = count($samples) - 1;
+			$p_tip = $samples[$N];
+
+			// Find shaft end (leave space for arrow head before p_tip)
+			$shaft_end_idx = $N;
+			for($k = $N; $k >= 0; $k--){
+				$dx = $p_tip[0] - $samples[$k][0];
+				$dy = $p_tip[1] - $samples[$k][1];
+				if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+			}
+			$tip_back     = $samples[$shaft_end_idx];
+			$tip_back_tan = $tangents[$shaft_end_idx];
+
+			// Build offset outlines
+			$left_pts  = array();
+			$right_pts = array();
+			for($k = 0; $k <= $shaft_end_idx; $k++){
+				$nx = -$tangents[$k][1];
+				$ny =  $tangents[$k][0];
+				$bx = $samples[$k][0];
+				$by = $samples[$k][1];
+				$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+				$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+			}
+			$tn_x = -$tip_back_tan[1];
+			$tn_y =  $tip_back_tan[0];
+			$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+			$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+			// Smooth helper (quadratic-bezier chain through points)
+			$smooth = function($pts, $reverse = false){
+				$n = count($pts);
+				if($reverse) $pts = array_reverse($pts);
+				$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+				for($i = 1; $i < $n - 1; $i++){
+					$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+					$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+					$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+				}
+				$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+				return $s;
+			};
+
+			$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+			$path_d .= $smooth($left_pts);
+			$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+				$base_l[0], $base_l[1],
+				$p_tip[0],  $p_tip[1],
+				$base_r[0], $base_r[1]);
+			$path_d .= " " . $smooth($right_pts, true);
+			$path_d .= " Z";
+
+			$stroke_w = $thick * 0.30;
+			$gloss_w  = $thick * 0.18;
+
+			$svg  = "\t\t<!-- L glass curved arrow U2 -> U3 -> F1 -> F3 -->\n";
+			$svg .= "\t\t<path d=\"{$path_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+			// Gloss centerline (small inset from both ends)
+			$g_in = max(2, intval($N * 0.08));
+			$gs = $g_in;
+			$ge = max($gs, $shaft_end_idx - $g_in);
+			if($ge > $gs){
+				$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+				for($k = $gs+1; $k <= $ge; $k++){
+					$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+				}
+				$svg .= "\t\t<path d=\"{$g_d}\"\n";
+				$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+			}
+
+			return $svg;
+		}
+
+		// R variant: 4-anchor smooth curved glass arrow (mirror of L).
+		//   Anchors (sticker centres):
+		//     A0 = F9 = centre of F bottom-right corner sticker (p[F][2][2] region)
+		//     A1 = F7 = centre of F top-right corner sticker    (p[F][2][0] region)
+		//     A2 = U9 = centre of U front-right corner sticker  (p[U][2][2] region)
+		//     A3 = U8 = centre of U back-right edge sticker     (p[U][2][1] region)
+		//   Path goes A0 -> A1 -> A2 -> A3 (R CW = upward); reversed for R'.
+		if($side == 'R'){
+			$sticker_centre = function($face, $r, $c) use (&$p){
+				$q00 = $p[$face][$r  ][$c  ];
+				$q10 = $p[$face][$r+1][$c  ];
+				$q11 = $p[$face][$r+1][$c+1];
+				$q01 = $p[$face][$r  ][$c+1];
+				return array(
+					($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+					($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+				);
+			};
+
+			$A0 = $sticker_centre($F, $d - 1, $d - 1);   // F9
+			$A1 = $sticker_centre($F, $d - 1, 0);        // F7
+			$A2 = $sticker_centre($U, $d - 1, $d - 1);   // U9
+			$A3 = $sticker_centre($U, $d - 1, 1);        // U8
+
+			$anchors = array($A0, $A1, $A2, $A3);
+			if($ccw){
+				$anchors = array_reverse($anchors);
+			}
+
+			$u_BL = $p[$U][0][0];
+			$u_FR = $p[$U][$d][$d];
+			$diag_u = sqrt(
+				($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+				($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+			);
+			$sticker_w = $diag_u / $d / 1.414;
+			$thick    = $sticker_w * 0.55;
+			$half_t   = $thick / 2;
+			$head_w   = $thick * 1.6;
+			$head_len = $thick * 1.8;
+
+			$alpha = 0.5;
+			$cr_points = array();
+			$cr_points[] = $anchors[0];
+			foreach($anchors as $a) $cr_points[] = $a;
+			$cr_points[] = $anchors[count($anchors)-1];
+
+			$N_per_seg = 24;
+			$samples  = array();
+			$tangents = array();
+			$tj = function($ti, $pi, $pj) use ($alpha){
+				$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+				$dist = sqrt($dx*$dx + $dy*$dy);
+				if($dist < 1e-9) $dist = 1e-9;
+				return $ti + pow($dist, $alpha);
+			};
+			for($i = 0; $i < count($anchors) - 1; $i++){
+				$P0 = $cr_points[$i];
+				$P1 = $cr_points[$i+1];
+				$P2 = $cr_points[$i+2];
+				$P3 = $cr_points[$i+3];
+				$t0 = 0.0;
+				$t1 = $tj($t0, $P0, $P1);
+				$t2 = $tj($t1, $P1, $P2);
+				$t3 = $tj($t2, $P2, $P3);
+				$is_last = ($i == count($anchors) - 2);
+				$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+				for($k = 0; $k <= $last_k; $k++){
+					$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+					$A1c = array(
+						($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+						($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+					);
+					$A2c = array(
+						($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+						($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+					);
+					$A3c = array(
+						($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+						($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+					);
+					$B1c = array(
+						($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+						($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+					);
+					$B2c = array(
+						($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+						($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+					);
+					$C  = array(
+						($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+						($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+					);
+					$samples[] = $C;
+					$eps = ($t2 - $t1) * 1e-3;
+					$tp  = max($t1, min($t2, $t + $eps));
+					$A1d = array(
+						($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+						($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+					);
+					$A2d = array(
+						($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+						($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+					);
+					$A3d = array(
+						($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+						($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+					);
+					$B1d = array(
+						($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+						($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+					);
+					$B2d = array(
+						($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+						($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+					);
+					$Cd  = array(
+						($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+						($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+					);
+					$tx = $Cd[0] - $C[0];
+					$ty = $Cd[1] - $C[1];
+					$tl = sqrt($tx*$tx + $ty*$ty);
+					if($tl < 1e-9) $tl = 1;
+					$tangents[] = array($tx/$tl, $ty/$tl);
+				}
+			}
+			$N = count($samples) - 1;
+			$p_tip = $samples[$N];
+
+			$shaft_end_idx = $N;
+			for($k = $N; $k >= 0; $k--){
+				$dx = $p_tip[0] - $samples[$k][0];
+				$dy = $p_tip[1] - $samples[$k][1];
+				if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+			}
+			$tip_back     = $samples[$shaft_end_idx];
+			$tip_back_tan = $tangents[$shaft_end_idx];
+
+			$left_pts  = array();
+			$right_pts = array();
+			for($k = 0; $k <= $shaft_end_idx; $k++){
+				$nx = -$tangents[$k][1];
+				$ny =  $tangents[$k][0];
+				$bx = $samples[$k][0];
+				$by = $samples[$k][1];
+				$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+				$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+			}
+			$tn_x = -$tip_back_tan[1];
+			$tn_y =  $tip_back_tan[0];
+			$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+			$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+			$smooth = function($pts, $reverse = false){
+				$n = count($pts);
+				if($reverse) $pts = array_reverse($pts);
+				$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+				for($i = 1; $i < $n - 1; $i++){
+					$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+					$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+					$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+				}
+				$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+				return $s;
+			};
+
+			$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+			$path_d .= $smooth($left_pts);
+			$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+				$base_l[0], $base_l[1],
+				$p_tip[0],  $p_tip[1],
+				$base_r[0], $base_r[1]);
+			$path_d .= " " . $smooth($right_pts, true);
+			$path_d .= " Z";
+
+			$stroke_w = $thick * 0.30;
+			$gloss_w  = $thick * 0.18;
+
+			$svg  = "\t\t<!-- R glass curved arrow F9 -> F7 -> U9 -> U8 -->\n";
+			$svg .= "\t\t<path d=\"{$path_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+			$g_in = max(2, intval($N * 0.08));
+			$gs = $g_in;
+			$ge = max($gs, $shaft_end_idx - $g_in);
+			if($ge > $gs){
+				$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+				for($k = $gs+1; $k <= $ge; $k++){
+					$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+				}
+				$svg .= "\t\t<path d=\"{$g_d}\"\n";
+				$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+			}
+
+			return $svg;
+		}
+
+		// Legacy R variant: straight F-right-column arrow logic (no longer dispatched).
+		// F face corners
+		$fc00 = $p[$F][0][0];
+		$fc10 = $p[$F][$d][0];
+		$fc11 = $p[$F][$d][$d];
+		$fc01 = $p[$F][0][$d];
+
+		// Identify which face-u boundary of F corresponds to "left" vs "right" in screen.
+		// Compute midpoints of the two u-boundary edges.
+		$mid_u0 = array(($fc00[0]+$fc01[0])/2, ($fc00[1]+$fc01[1])/2); // u=0 edge midpoint
+		$mid_u1 = array(($fc10[0]+$fc11[0])/2, ($fc10[1]+$fc11[1])/2); // u=d edge midpoint
+		// "Left" edge of F = smaller screen X; "right" = greater screen X
+		if($mid_u0[0] < $mid_u1[0]){
+			$f_left_edge_u0_pt = $fc00; $f_left_edge_u1_pt = $fc01;  // u=0 edge points
+			$f_right_edge_u0_pt = $fc10; $f_right_edge_u1_pt = $fc11; // u=d edge points
+			$u_left = 0; $u_right = $d;
+		} else {
+			$f_left_edge_u0_pt = $fc10; $f_left_edge_u1_pt = $fc11;
+			$f_right_edge_u0_pt = $fc00; $f_right_edge_u1_pt = $fc01;
+			$u_left = $d; $u_right = 0;
+		}
+
+		// Pick the column to draw on. The arrow runs along the column from top to bottom
+		// of the F face. The column lies between u=u_target and u=u_target_inner
+		// (a one-sticker-wide band along the chosen edge).
+		if($side == 'L'){
+			$u_outer = $u_left;
+			$u_inner = $u_left + ($u_right - $u_left) * (1.0 / $d); // one sticker inward
+		} else { // R
+			$u_outer = $u_right;
+			$u_inner = $u_right + ($u_left - $u_right) * (1.0 / $d); // one sticker inward
+		}
+
+		// Centerline u position (midway of the column)
+		$u_center = ($u_outer + $u_inner) / 2;
+
+		// Bilinear map on the F face
+		$bilinear = function($u, $v) use ($fc00, $fc10, $fc11, $fc01, $d){
+			$su = $u / $d;  $sv = $v / $d;
+			$x = (1-$su)*(1-$sv)*$fc00[0] + $su*(1-$sv)*$fc10[0] + $su*$sv*$fc11[0] + (1-$su)*$sv*$fc01[0];
+			$y = (1-$su)*(1-$sv)*$fc00[1] + $su*(1-$sv)*$fc10[1] + $su*$sv*$fc11[1] + (1-$su)*$sv*$fc01[1];
+			return array($x, $y);
+		};
+
+		// Identify which v direction is "top" (smaller screen Y) of F.
+		$probe_v0 = $bilinear($u_center, 0);
+		$probe_v1 = $bilinear($u_center, $d);
+		$v_top = ($probe_v0[1] < $probe_v1[1]) ? 0 : $d;
+		$v_bot = ($v_top == 0) ? $d : 0;
+
+		// Endpoints along the column, with small inset from face edge.
+		$inset_v = 0.12;  // fraction of d
+		$v_a = $v_top + ($v_bot - $v_top) * $inset_v;          // near top
+		$v_b = $v_top + ($v_bot - $v_top) * (1 - $inset_v);    // near bottom
+
+		// Determine direction: which v is the TAIL (start) and which is the TIP (end)?
+		// L  CW : down  → tail=top, tip=bot
+		// L' CCW: up    → tail=bot, tip=top
+		// R  CW : up    → tail=bot, tip=top
+		// R' CCW: down  → tail=top, tip=bot
+		if($side == 'L'){
+			$dir_down = !$ccw;  // L: CW=down; CCW=up
+		} else {
+			$dir_down = $ccw;   // R: CW=up; CCW=down
+		}
+		if($dir_down){
+			$v_tail = $v_a; $v_tip = $v_b;
+		} else {
+			$v_tail = $v_b; $v_tip = $v_a;
+		}
+
+		// Compute screen-space endpoints
+		$p_tail = $bilinear($u_center, $v_tail);
+		$p_tip  = $bilinear($u_center, $v_tip);
+
+		// Arrow direction (screen)
+		$adx = $p_tip[0] - $p_tail[0];
+		$ady = $p_tip[1] - $p_tail[1];
+		$alen = sqrt($adx*$adx + $ady*$ady);
+		if($alen < 1e-9){ return ''; }
+		$aux = $adx / $alen; $auy = $ady / $alen;
+		// Perpendicular
+		$apx = -$auy; $apy = $aux;
+
+		// Sticker-width scale: project one sticker width through bilinear at center
+		$p_col_outer = $bilinear($u_outer, ($v_tail+$v_tip)/2);
+		$p_col_inner = $bilinear($u_inner, ($v_tail+$v_tip)/2);
+		$sticker_w = sqrt(
+			($p_col_outer[0]-$p_col_inner[0])*($p_col_outer[0]-$p_col_inner[0])
+			+ ($p_col_outer[1]-$p_col_inner[1])*($p_col_outer[1]-$p_col_inner[1])
+		);
+
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = min($thick * 1.8, $alen * 0.4);
+
+		// Tip-back (where the shaft meets the arrowhead base)
+		$tip_back = array($p_tip[0] - $aux*$head_len, $p_tip[1] - $auy*$head_len);
+
+		// Build polygon: tail-left, tip-back-left, base-left, tip, base-right, tip-back-right, tail-right
+		$tail_l = array($p_tail[0] - $apx*$half_t, $p_tail[1] - $apy*$half_t);
+		$tail_r = array($p_tail[0] + $apx*$half_t, $p_tail[1] + $apy*$half_t);
+		$tb_l   = array($tip_back[0] - $apx*$half_t, $tip_back[1] - $apy*$half_t);
+		$tb_r   = array($tip_back[0] + $apx*$half_t, $tip_back[1] + $apy*$half_t);
+		$base_l = array($tip_back[0] - $apx*$head_w, $tip_back[1] - $apy*$head_w);
+		$base_r = array($tip_back[0] + $apx*$head_w, $tip_back[1] + $apy*$head_w);
+
+		$path_d = sprintf("M %.3f,%.3f L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f Z",
+			$tail_l[0], $tail_l[1],
+			$tb_l[0],   $tb_l[1],
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1],
+			$tb_r[0],   $tb_r[1],
+			$tail_r[0], $tail_r[1]
+		);
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- {$side} column glass arrow on F face -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		// White gloss highlight: a line along the centerline shrunk inward
+		$gloss_inset = $thick * 0.18;
+		$g_tail = array($p_tail[0] + $aux*$gloss_inset, $p_tail[1] + $auy*$gloss_inset);
+		$g_tip  = array($tip_back[0] - $aux*$gloss_inset, $tip_back[1] - $auy*$gloss_inset);
+		$svg .= sprintf("\t\t<path d=\"M %.3f,%.3f L %.3f,%.3f\"\n",
+			$g_tail[0], $g_tail[1], $g_tip[0], $g_tip[1]);
+		$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+
+		return $svg;
+	}
+
+	/**
+	 * U-move arrow: glass-style wrap arrow analogous to D, but on the upper part of the cube.
+	 * Spans R-face top row + F-face top row, wrapping around the U/F/R vertical corner.
+	 * Tail at far back-right corner (top of R back column);
+	 * tip at the middle of F's top edge (middle of front face top row).
+	 */
+	function gen_glass_u_wrap_arrow($ccw, $hl){
+		global $p, $dim, $F, $R, $U;
+
+		$d = $dim;
+		// 4-anchor smooth curved glass arrow for U move.
+		//   Anchors (sticker centres):
+		//     A0 = R7 = centre of R top-front sticker  (p[R][2][0] region)
+		//     A1 = R1 = centre of R top-back sticker   (p[R][0][0] region)
+		//     A2 = F7 = centre of F top-right sticker  (p[F][2][0] region)
+		//     A3 = F4 = centre of F top-middle sticker (p[F][1][0] region)
+		//   Path goes A0 -> A1 -> A2 -> A3 (U CW); reversed for U'.
+		$sticker_centre = function($face, $r, $c) use (&$p){
+			$q00 = $p[$face][$r  ][$c  ];
+			$q10 = $p[$face][$r+1][$c  ];
+			$q11 = $p[$face][$r+1][$c+1];
+			$q01 = $p[$face][$r  ][$c+1];
+			return array(
+				($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+				($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+			);
+		};
+
+		$A0 = $sticker_centre($R, $d - 1, 0);    // R7
+		$A1 = $sticker_centre($R, 0, 0);         // R1
+		$A2 = $sticker_centre($F, $d - 1, 0);    // F7
+		$A3 = $sticker_centre($F, 1, 0);         // F4
+
+		$anchors = array($A0, $A1, $A2, $A3);
+		if($ccw){
+			$anchors = array_reverse($anchors);
+		}
+
+		// Sticker width estimate (using U-face diagonal)
+		$u_BL = $p[$U][0][0];
+		$u_FR = $p[$U][$d][$d];
+		$diag_u = sqrt(
+			($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+			($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+		);
+		$sticker_w = $diag_u / $d / 1.414;
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = $thick * 1.8;
+
+		// Centripetal Catmull-Rom sampling through anchors
+		$alpha = 0.5;
+		$cr_points = array();
+		$cr_points[] = $anchors[0];
+		foreach($anchors as $a) $cr_points[] = $a;
+		$cr_points[] = $anchors[count($anchors)-1];
+
+		$N_per_seg = 24;
+		$samples  = array();
+		$tangents = array();
+		$tj = function($ti, $pi, $pj) use ($alpha){
+			$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+			$dist = sqrt($dx*$dx + $dy*$dy);
+			if($dist < 1e-9) $dist = 1e-9;
+			return $ti + pow($dist, $alpha);
+		};
+		for($i = 0; $i < count($anchors) - 1; $i++){
+			$P0 = $cr_points[$i];
+			$P1 = $cr_points[$i+1];
+			$P2 = $cr_points[$i+2];
+			$P3 = $cr_points[$i+3];
+			$t0 = 0.0;
+			$t1 = $tj($t0, $P0, $P1);
+			$t2 = $tj($t1, $P1, $P2);
+			$t3 = $tj($t2, $P2, $P3);
+			$is_last = ($i == count($anchors) - 2);
+			$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+			for($k = 0; $k <= $last_k; $k++){
+				$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+				$A1c = array(
+					($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+					($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2c = array(
+					($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+					($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3c = array(
+					($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+					($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1c = array(
+					($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+					($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+				);
+				$B2c = array(
+					($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+					($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+				);
+				$C  = array(
+					($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+					($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+				);
+				$samples[] = $C;
+				$eps = ($t2 - $t1) * 1e-3;
+				$tp  = max($t1, min($t2, $t + $eps));
+				$A1d = array(
+					($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+					($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2d = array(
+					($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+					($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3d = array(
+					($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+					($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1d = array(
+					($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+					($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+				);
+				$B2d = array(
+					($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+					($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+				);
+				$Cd  = array(
+					($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+					($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+				);
+				$tx = $Cd[0] - $C[0];
+				$ty = $Cd[1] - $C[1];
+				$tl = sqrt($tx*$tx + $ty*$ty);
+				if($tl < 1e-9) $tl = 1;
+				$tangents[] = array($tx/$tl, $ty/$tl);
+			}
+		}
+		$N = count($samples) - 1;
+		$p_tip = $samples[$N];
+
+		$shaft_end_idx = $N;
+		for($k = $N; $k >= 0; $k--){
+			$dx = $p_tip[0] - $samples[$k][0];
+			$dy = $p_tip[1] - $samples[$k][1];
+			if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+		}
+		$tip_back     = $samples[$shaft_end_idx];
+		$tip_back_tan = $tangents[$shaft_end_idx];
+
+		$left_pts  = array();
+		$right_pts = array();
+		for($k = 0; $k <= $shaft_end_idx; $k++){
+			$nx = -$tangents[$k][1];
+			$ny =  $tangents[$k][0];
+			$bx = $samples[$k][0];
+			$by = $samples[$k][1];
+			$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+			$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+		}
+		$tn_x = -$tip_back_tan[1];
+		$tn_y =  $tip_back_tan[0];
+		$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+		$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+		$smooth = function($pts, $reverse = false){
+			$n = count($pts);
+			if($reverse) $pts = array_reverse($pts);
+			$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+			for($i = 1; $i < $n - 1; $i++){
+				$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+				$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+				$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+			}
+			$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+			return $s;
+		};
+
+		$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+		$path_d .= $smooth($left_pts);
+		$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1]);
+		$path_d .= " " . $smooth($right_pts, true);
+		$path_d .= " Z";
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- U glass curved arrow R7 -> R1 -> F7 -> F4 -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		$g_in = max(2, intval($N * 0.08));
+		$gs = $g_in;
+		$ge = max($gs, $shaft_end_idx - $g_in);
+		if($ge > $gs){
+			$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+			for($k = $gs+1; $k <= $ge; $k++){
+				$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+			}
+			$svg .= "\t\t<path d=\"{$g_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+		}
+
+		return $svg;
+	}
+
+
+	/**
+	 * B-move arrow: a glass-style arrow that wraps from the back row of U
+	 * around the U-R back edge and continues along the back column of R.
+	 * Mirrors the structure of gen_glass_d_wrap_arrow but for the upper/back area.
+	 */
+	function gen_glass_b_wrap_arrow($ccw, $hl){
+		global $p, $dim, $U, $R;
+
+		$d = $dim;
+		// 4-anchor smooth curved glass arrow for B move.
+		//   Anchors (sticker centres):
+		//     A0 = R9 = centre of R bottom-front sticker (p[R][d-1][d-1])
+		//     A1 = R7 = centre of R top-front sticker    (p[R][d-1][0])
+		//     A2 = U7 = centre of U back-right corner    (p[U][d-1][0])
+		//     A3 = U4 = centre of U back-mid sticker     (p[U][1][0])
+		//   Wait — re-check: U numbering row-major as displayed:
+		//     U1=(0,0)=back top, U2=(0,1), U3=(0,2)=front-left,
+		//     U4=(1,0), U5=(1,1)=center, U6=(1,2),
+		//     U7=(2,0)=back-right, U8=(2,1), U9=(2,2)=front-right.
+		//   So U7 = sticker_centre(U, 2, 0); U4 = sticker_centre(U, 1, 0).
+		//   R numbering row-major:
+		//     R1=(0,0)=top-back, R2=(0,1)=mid-back, R3=(0,2)=bot-back,
+		//     R4=(1,0)=top-mid, R5=(1,1)=center, R6=(1,2)=bot-mid,
+		//     R7=(2,0)=top-front, R8=(2,1)=mid-front, R9=(2,2)=bot-front.
+		//   So R9 = sticker_centre(R, 2, 2); R7 = sticker_centre(R, 2, 0).
+		//   Path goes A0 -> A1 -> A2 -> A3 (B CW); reversed for B'.
+		$sticker_centre = function($face, $r, $c) use (&$p){
+			$q00 = $p[$face][$r  ][$c  ];
+			$q10 = $p[$face][$r+1][$c  ];
+			$q11 = $p[$face][$r+1][$c+1];
+			$q01 = $p[$face][$r  ][$c+1];
+			return array(
+				($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+				($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+			);
+		};
+
+		$A0 = $sticker_centre($R, $d - 1, $d - 1);   // R9
+		$A1 = $sticker_centre($R, $d - 1, 0);        // R7
+		$A2 = $sticker_centre($U, $d - 1, 0);        // U7
+		$A3 = $sticker_centre($U, 1, 0);             // U4
+
+		$anchors = array($A0, $A1, $A2, $A3);
+		if($ccw){
+			$anchors = array_reverse($anchors);
+		}
+
+		// Sticker width estimate (using U-face diagonal — matches U/L/R/D thickness)
+		$u_BL = $p[$U][0][0];
+		$u_FR = $p[$U][$d][$d];
+		$diag_u = sqrt(
+			($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+			($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+		);
+		$sticker_w = $diag_u / $d / 1.414;
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = $thick * 1.8;
+
+		// Centripetal Catmull-Rom sampling through anchors
+		$alpha = 0.5;
+		$cr_points = array();
+		$cr_points[] = $anchors[0];
+		foreach($anchors as $a) $cr_points[] = $a;
+		$cr_points[] = $anchors[count($anchors)-1];
+
+		$N_per_seg = 24;
+		$samples  = array();
+		$tangents = array();
+		$tj = function($ti, $pi, $pj) use ($alpha){
+			$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+			$dist = sqrt($dx*$dx + $dy*$dy);
+			if($dist < 1e-9) $dist = 1e-9;
+			return $ti + pow($dist, $alpha);
+		};
+		for($i = 0; $i < count($anchors) - 1; $i++){
+			$P0 = $cr_points[$i];
+			$P1 = $cr_points[$i+1];
+			$P2 = $cr_points[$i+2];
+			$P3 = $cr_points[$i+3];
+			$t0 = 0.0;
+			$t1 = $tj($t0, $P0, $P1);
+			$t2 = $tj($t1, $P1, $P2);
+			$t3 = $tj($t2, $P2, $P3);
+			$is_last = ($i == count($anchors) - 2);
+			$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+			for($k = 0; $k <= $last_k; $k++){
+				$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+				$A1c = array(
+					($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+					($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2c = array(
+					($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+					($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3c = array(
+					($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+					($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1c = array(
+					($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+					($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+				);
+				$B2c = array(
+					($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+					($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+				);
+				$C  = array(
+					($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+					($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+				);
+				$samples[] = $C;
+				$eps = ($t2 - $t1) * 1e-3;
+				$tp  = max($t1, min($t2, $t + $eps));
+				$A1d = array(
+					($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+					($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2d = array(
+					($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+					($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3d = array(
+					($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+					($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1d = array(
+					($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+					($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+				);
+				$B2d = array(
+					($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+					($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+				);
+				$Cd  = array(
+					($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+					($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+				);
+				$tx = $Cd[0] - $C[0];
+				$ty = $Cd[1] - $C[1];
+				$tl = sqrt($tx*$tx + $ty*$ty);
+				if($tl < 1e-9) $tl = 1;
+				$tangents[] = array($tx/$tl, $ty/$tl);
+			}
+		}
+		$N = count($samples) - 1;
+		$p_tip = $samples[$N];
+
+		$shaft_end_idx = $N;
+		for($k = $N; $k >= 0; $k--){
+			$dx = $p_tip[0] - $samples[$k][0];
+			$dy = $p_tip[1] - $samples[$k][1];
+			if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+		}
+		$tip_back     = $samples[$shaft_end_idx];
+		$tip_back_tan = $tangents[$shaft_end_idx];
+
+		$left_pts  = array();
+		$right_pts = array();
+		for($k = 0; $k <= $shaft_end_idx; $k++){
+			$nx = -$tangents[$k][1];
+			$ny =  $tangents[$k][0];
+			$bx = $samples[$k][0];
+			$by = $samples[$k][1];
+			$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+			$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+		}
+		$tn_x = -$tip_back_tan[1];
+		$tn_y =  $tip_back_tan[0];
+		$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+		$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+		$smooth = function($pts, $reverse = false){
+			$n = count($pts);
+			if($reverse) $pts = array_reverse($pts);
+			$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+			for($i = 1; $i < $n - 1; $i++){
+				$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+				$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+				$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+			}
+			$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+			return $s;
+		};
+
+		$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+		$path_d .= $smooth($left_pts);
+		$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1]);
+		$path_d .= " " . $smooth($right_pts, true);
+		$path_d .= " Z";
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- B glass curved arrow R9 -> R7 -> U7 -> U4 -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		$g_in = max(2, intval($N * 0.08));
+		$gs = $g_in;
+		$ge = max($gs, $shaft_end_idx - $g_in);
+		if($ge > $gs){
+			$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+			for($k = $gs+1; $k <= $ge; $k++){
+				$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+			}
+			$svg .= "\t\t<path d=\"{$g_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+		}
+
+		return $svg;
+	}
+
+	function gen_glass_arc_arrow_u($ccw, $hl){
+		return gen_glass_arc_arrow_face('U', $ccw, $hl);
+	}
+
+	/**
+	 * Half-circle glass arrow projected onto a cube face.
+	 * Works for U, D (and could be extended to F/B/L/R but those have other styles now).
+	 */
+	function gen_glass_arc_arrow_face($face_name, $ccw, $hl){
+		global $p, $dim, $U, $D, $F, $B, $L, $R;
+
+		$face_map = array('U'=>$U, 'D'=>$D, 'F'=>$F, 'B'=>$B, 'L'=>$L, 'R'=>$R);
+		$face_id = isset($face_map[$face_name]) ? $face_map[$face_name] : $U;
+		// Face projected corners (screen 2D)
+		$c00 = $p[$face_id][0][0];
+		$c10 = $p[$face_id][$dim][0];
+		$c11 = $p[$face_id][$dim][$dim];
+		$c01 = $p[$face_id][0][$dim];
+
+		// Bilinear map: (u,v) in [0,dim] x [0,dim] -> screen point
+		$d = $dim;
+		$bilinear = function($u, $v) use ($c00, $c10, $c11, $c01, $d){
+			$su = $u / $d;  $sv = $v / $d;
+			$x = (1-$su)*(1-$sv)*$c00[0] + $su*(1-$sv)*$c10[0] + $su*$sv*$c11[0] + (1-$su)*$sv*$c01[0];
+			$y = (1-$su)*(1-$sv)*$c00[1] + $su*(1-$sv)*$c10[1] + $su*$sv*$c11[1] + (1-$su)*$sv*$c01[1];
+			return array($x, $y);
+		};
+
+		// Half-circle in face-local space, centered on face center
+		$cu = $d / 2;  $cv = $d / 2;
+		// For D: shift the arc center toward the "front" edge of the D face (screen-bottom),
+		// so the arrow sits on the lower/front row of D rather than the middle.
+		if($face_name == 'D'){
+			// Pick the v direction whose edge midpoint has greater screen-Y (lower on screen = front)
+			$mid_v0 = array(($c00[0]+$c10[0])/2, ($c00[1]+$c10[1])/2); // edge at v=0
+			$mid_v1 = array(($c01[0]+$c11[0])/2, ($c01[1]+$c11[1])/2); // edge at v=dim
+			if($mid_v1[1] > $mid_v0[1]){
+				$cv = $d * 1.05;
+			} else {
+				$cv = $d * -0.05;
+			}
+			// Shift along u toward the "right" edge (greater screen-X)
+			$mid_u0 = array(($c00[0]+$c01[0])/2, ($c00[1]+$c01[1])/2); // edge at u=0
+			$mid_u1 = array(($c10[0]+$c11[0])/2, ($c10[1]+$c11[1])/2); // edge at u=dim
+			if($mid_u1[0] > $mid_u0[0]){
+				$cu = $d * 0.62;
+			} else {
+				$cu = $d * 0.38;
+			}
+		}
+		// For L/R: shift the arc center to lie just OUTSIDE the front-vertical edge of
+		// the face (the edge closest to F), so the arc (bulging inward) covers the
+		// visible portion of the side face.
+		// $lr_apex_mid records the face-angle whose direction points INTO the face from
+		// the chosen $cu (i.e. away from the front edge). It's set together with $cu so
+		// the sweep code below can use it.
+		$lr_apex_mid = null;
+		if($face_name == 'L' || $face_name == 'R'){
+			// Which u-edge of the face is the "front" one (closest to F = lying closer
+			// to the F face seam in screen space)?
+			//   R: F seam is on the LEFT of R (smaller screen X)
+			//   L: F seam is on the RIGHT of L (greater screen X)
+			$mid_u0 = array(($c00[0]+$c01[0])/2, ($c00[1]+$c01[1])/2); // edge u=0
+			$mid_u1 = array(($c10[0]+$c11[0])/2, ($c10[1]+$c11[1])/2); // edge u=dim
+			if($face_name == 'R'){
+				// front edge = whichever u-edge has SMALLER screen X
+				$u0_is_front = ($mid_u0[0] < $mid_u1[0]);
+			} else { // L
+				// front edge = whichever u-edge has GREATER screen X
+				$u0_is_front = ($mid_u0[0] > $mid_u1[0]);
+			}
+			if($u0_is_front){
+				// front edge at u=0 → put center just outside at u=-0.05d
+				// apex direction is +u (cos(0)=+1) so apex_mid = 0
+				$cu = $d * -0.05;
+				$lr_apex_mid = 0.0;
+			} else {
+				// front edge at u=d → put center just outside at u=1.05d
+				// apex direction is -u (cos(π)=-1) so apex_mid = π
+				$cu = $d * 1.05;
+				$lr_apex_mid = M_PI;
+			}
+			// Vertical centering: midway is fine for a tall arc spanning top-bottom.
+			$cv = $d * 0.5;
+		}
+		$radius_face   = $d * 0.32;   // ~ medium size
+		// For D the arc is shifted toward the front; use a slightly smaller radius
+		// so it sits cleanly on the front row.
+		if($face_name == 'D'){
+			$radius_face = $d * 0.50;
+		}
+		// For L/R: larger radius so the arc spans the full visible height of the face.
+		if($face_name == 'L' || $face_name == 'R'){
+			$radius_face = $d * 0.55;
+		}
+		$thick_face    = $d * 0.10;   // band thickness in face coords
+		$head_w_face   = $d * 0.16;   // arrowhead half-width
+		$head_len_face = $d * 0.18;   // arrowhead length (along arc)
+
+		$r_out = $radius_face + $thick_face / 2;
+		$r_in  = $radius_face - $thick_face / 2;
+
+		// Sweep: half-circle from angle 0 to angle π (180°)
+		// CW (default): start at right (a=0), sweep counterclockwise in face coords (a → π) over the "top" (-v direction)
+		// In face coords let's say angle 0 = +u axis, angle increases CCW (toward -v which is "front" of U)
+		// But we want it to look CW when viewed from above (the standard U convention).
+		// Using face coord with v pointing "back" of cube and u pointing "right":
+		//   angle 0 = +u (right), π/2 = -v (front), π = -u (left), -π/2 = +v (back)
+		// CW move arrow: tail at left (π), going through back (-π/2 = 3π/2), ending tip at right (0 or 2π)
+		// CCW: opposite
+		// For D face, CW visually = opposite sweep direction in the same UV grid
+		// (because we're effectively "looking through" from above)
+		$effective_ccw = ($face_name == 'D') ? !$ccw : $ccw;
+
+		// Sweep angle: 180° default (half-circle); reduced for D to make the arc longer and flatter
+		$sweep = M_PI;
+		if($face_name == 'D'){ $sweep = M_PI * 0.55; }  // ~100°
+		$mid = 1.5 * M_PI;  // arc apex at "back" of face (smaller v / -y in screen)
+
+		// For L/R, the arc center is at u≈±0.05*d (front edge of the side face).
+		// The arc apex points INTO the face along ±u, and endpoints are near top/bottom (±v).
+		if($face_name == 'R' || $face_name == 'L'){
+			$sweep = M_PI * 0.85; // a bit less than 180° so endpoints sit inside the face
+			$mid = ($lr_apex_mid !== null) ? $lr_apex_mid : 0.0;
+		}
+		// CW (viewed from outside the face): tail on +u side going through -v (back/top of screen)
+		// to tip on -u side would be CCW visually. We want CW = tail at -u, through -v, tip at +u.
+		if(!$effective_ccw){
+			$a_start = $mid - $sweep / 2;  // tail (left)
+			$a_end   = $mid + $sweep / 2;  // tip  (right)
+		} else {
+			$a_start = $mid + $sweep / 2;
+			$a_end   = $mid - $sweep / 2;
+		}
+
+		// Reserve angular space for the arrowhead
+		$head_ang = $head_len_face / $radius_face;
+		$dir_sign = ($a_end > $a_start) ? 1 : -1;
+		$a_head_base = $a_end - $dir_sign * $head_ang;
+
+		// Helper to get face-coord point on a circle of given radius at angle a
+		$on_arc = function($a, $r) use ($cu, $cv){
+			return array($cu + cos($a) * $r, $cv + sin($a) * $r);
+		};
+
+		// Compute screen-space tangent at a face-space arc point using the bilinear Jacobian.
+		// At face point (u,v), arc tangent in face coords is (-sin a, cos a) * radius * dir.
+		// Map this through the bilinear partial derivatives to get the screen tangent.
+		$bilinear_jacobian = function($u, $v) use ($c00, $c10, $c11, $c01, $d){
+			$su = $u / $d;  $sv = $v / $d;
+			// dP/du = (1-sv)*(c10-c00) + sv*(c11-c01),  scaled by 1/d
+			$dPdu_x = ((1-$sv)*($c10[0]-$c00[0]) + $sv*($c11[0]-$c01[0])) / $d;
+			$dPdu_y = ((1-$sv)*($c10[1]-$c00[1]) + $sv*($c11[1]-$c01[1])) / $d;
+			$dPdv_x = ((1-$su)*($c01[0]-$c00[0]) + $su*($c11[0]-$c10[0])) / $d;
+			$dPdv_y = ((1-$su)*($c01[1]-$c00[1]) + $su*($c11[1]-$c10[1])) / $d;
+			return array($dPdu_x, $dPdu_y, $dPdv_x, $dPdv_y);
+		};
+		// Returns screen-space tangent vector for a circle parametrized at angle a, radius r
+		$arc_tangent_screen = function($a, $r) use ($cu, $cv, $bilinear_jacobian){
+			$u = $cu + cos($a) * $r;
+			$v = $cv + sin($a) * $r;
+			// Face-space tangent: derivative w.r.t. a → (-sin a, cos a) * r
+			$tu = -sin($a) * $r;
+			$tv =  cos($a) * $r;
+			$J = $bilinear_jacobian($u, $v);
+			// Screen tangent = J * face tangent
+			$sx = $J[0] * $tu + $J[2] * $tv;
+			$sy = $J[1] * $tu + $J[3] * $tv;
+			return array($sx, $sy);
+		};
+
+		// Build one arc edge as N cubic beziers (one per angular segment).
+		// Each segment uses endpoint positions + tangents for exact tangent matching.
+		$build_arc_edge = function($a_from, $a_to, $r, $segments) use ($on_arc, $bilinear, $arc_tangent_screen){
+			$path = '';
+			$da = ($a_to - $a_from) / $segments;
+			// Standard "magic number" for cubic bezier circle approximation per segment:
+			// k = (4/3) * tan(da/4)
+			$k = (4.0 / 3.0) * tan(abs($da) / 4.0);
+			$sign = ($da >= 0) ? 1 : -1;
+			$prev_pt = null;
+			for($i = 0; $i < $segments; $i++){
+				$a0 = $a_from + $i * $da;
+				$a1 = $a_from + ($i + 1) * $da;
+				$p0_face = $on_arc($a0, $r);
+				$p1_face = $on_arc($a1, $r);
+				$p0 = $bilinear($p0_face[0], $p0_face[1]);
+				$p1 = $bilinear($p1_face[0], $p1_face[1]);
+				// Tangents at endpoints (in screen space)
+				$t0 = $arc_tangent_screen($a0, $r);
+				$t1 = $arc_tangent_screen($a1, $r);
+				// Control points: offset endpoints along tangent by k * (segment angular extent / dt) — but since
+				// we used (4/3)tan(da/4), control point distance along tangent = k (when tangent is unit-length × radius).
+				// Our tangent magnitude = |dP/da|, and we want offset = k * |dP/da| * sign(da)
+				// Actually for unit-circle: cp = endpoint + k * tangent_unit * radius * sign
+				// Since our tangent already includes the radius scaling, offset = k * tangent * sign
+				$cp1x = $p0[0] + $k * $t0[0] * $sign;
+				$cp1y = $p0[1] + $k * $t0[1] * $sign;
+				$cp2x = $p1[0] - $k * $t1[0] * $sign;
+				$cp2y = $p1[1] - $k * $t1[1] * $sign;
+				$path .= sprintf(" C %.2f,%.2f %.2f,%.2f %.2f,%.2f", $cp1x, $cp1y, $cp2x, $cp2y, $p1[0], $p1[1]);
+			}
+			return $path;
+		};
+
+		// Use 4 bezier segments per arc edge — gives near-perfect circle approximation
+		$arc_segs = 4;
+
+		// Helper: emit the full closed arrow path
+		$build_arrow = function($r_out_use, $r_in_use, $head_w_use) use ($build_arc_edge, $bilinear, $on_arc, $a_start, $a_head_base, $a_end, $arc_segs, $radius_face){
+			$start_outer = $bilinear($on_arc($a_start, $r_out_use)[0], $on_arc($a_start, $r_out_use)[1]);
+			$d  = sprintf("M %.2f,%.2f", $start_outer[0], $start_outer[1]);
+			// Outer arc
+			$d .= $build_arc_edge($a_start, $a_head_base, $r_out_use, $arc_segs);
+			// Arrowhead corners (sharp lines)
+			$ah1 = $bilinear($on_arc($a_head_base, $radius_face + $head_w_use)[0], $on_arc($a_head_base, $radius_face + $head_w_use)[1]);
+			$tip = $bilinear($on_arc($a_end,       $radius_face)[0],              $on_arc($a_end,       $radius_face)[1]);
+			$ah2 = $bilinear($on_arc($a_head_base, $radius_face - $head_w_use)[0], $on_arc($a_head_base, $radius_face - $head_w_use)[1]);
+			$d .= sprintf(" L %.2f,%.2f L %.2f,%.2f L %.2f,%.2f", $ah1[0], $ah1[1], $tip[0], $tip[1], $ah2[0], $ah2[1]);
+			// Line to inner arc start (at a_head_base, r_in)
+			$inner_head = $bilinear($on_arc($a_head_base, $r_in_use)[0], $on_arc($a_head_base, $r_in_use)[1]);
+			$d .= sprintf(" L %.2f,%.2f", $inner_head[0], $inner_head[1]);
+			// Inner arc back
+			$d .= $build_arc_edge($a_head_base, $a_start, $r_in_use, $arc_segs);
+			$d .= " Z";
+			return $d;
+		};
+
+		$path_d = $build_arrow($r_out, $r_in, $head_w_face);
+
+		// Reference size for stroke widths (use a screen length for visual consistency)
+		$diag_screen = sqrt(($c11[0]-$c00[0])*($c11[0]-$c00[0]) + ($c11[1]-$c00[1])*($c11[1]-$c00[1]));
+		$stroke_w = $diag_screen * 0.012;
+		$gloss_w  = $diag_screen * 0.008;
+
+		$svg  = "\t\t<!-- glass arc arrow on U face -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		// Inner gloss: shrink radii inward by a small amount in face space
+		$shrink_face = $thick_face * 0.18;
+		$gloss_d = $build_arrow($r_out - $shrink_face, $r_in + $shrink_face, $head_w_face - $shrink_face);
+		$svg .= "\t\t<path d=\"{$gloss_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linejoin:round\"/>\n";
+
+		return $svg;
+	}
+
+
+	/**
+	 * x cube rotation: glass-style curved arrow with 4 anchors.
+	 *   F6 (F mid-right edge) -> F4 (F top-middle) -> U6 (U front-middle edge)
+	 *     -> U5 (U centre).
+	 * Sticker indices follow row-major p[face][r][c] numbering used by the
+	 * &numbers=1 overlay.
+	 */
+	function gen_glass_x_rotation_arrow($ccw, $hl){
+		global $p, $dim, $F, $U;
+
+		$d = $dim;
+		$sticker_centre = function($face, $r, $c) use (&$p){
+			$q00 = $p[$face][$r  ][$c  ];
+			$q10 = $p[$face][$r+1][$c  ];
+			$q11 = $p[$face][$r+1][$c+1];
+			$q01 = $p[$face][$r  ][$c+1];
+			return array(
+				($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+				($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+			);
+		};
+
+		// Anchors (with d=3):
+		//   F5 = (1, 1), F4 = (1, 0)
+		//   U6 = (1, 2), U5 = (1, 1)
+		$A0 = $sticker_centre($F, 1, 1);        // F5
+		$A1 = $sticker_centre($F, 1, 0);        // F4
+		$A2 = $sticker_centre($U, 1, $d - 1);   // U6
+		$A3 = $sticker_centre($U, 1, 1);        // U5
+
+		$anchors = array($A0, $A1, $A2, $A3);
+		if($ccw){
+			$anchors = array_reverse($anchors);
+		}
+
+		// Sticker width estimate (U-face diagonal, matches other moves)
+		$u_BL = $p[$U][0][0];
+		$u_FR = $p[$U][$d][$d];
+		$diag_u = sqrt(
+			($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+			($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+		);
+		$sticker_w = $diag_u / $d / 1.414;
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = $thick * 1.8;
+
+		$alpha = 0.5;
+		$cr_points = array();
+		$cr_points[] = $anchors[0];
+		foreach($anchors as $a) $cr_points[] = $a;
+		$cr_points[] = $anchors[count($anchors)-1];
+
+		$N_per_seg = 24;
+		$samples  = array();
+		$tangents = array();
+		$tj = function($ti, $pi, $pj) use ($alpha){
+			$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+			$dist = sqrt($dx*$dx + $dy*$dy);
+			if($dist < 1e-9) $dist = 1e-9;
+			return $ti + pow($dist, $alpha);
+		};
+		for($i = 0; $i < count($anchors) - 1; $i++){
+			$P0 = $cr_points[$i];
+			$P1 = $cr_points[$i+1];
+			$P2 = $cr_points[$i+2];
+			$P3 = $cr_points[$i+3];
+			$t0 = 0.0;
+			$t1 = $tj($t0, $P0, $P1);
+			$t2 = $tj($t1, $P1, $P2);
+			$t3 = $tj($t2, $P2, $P3);
+			$is_last = ($i == count($anchors) - 2);
+			$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+			for($k = 0; $k <= $last_k; $k++){
+				$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+				$A1c = array(
+					($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+					($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2c = array(
+					($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+					($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3c = array(
+					($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+					($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1c = array(
+					($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+					($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+				);
+				$B2c = array(
+					($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+					($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+				);
+				$C  = array(
+					($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+					($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+				);
+				$samples[] = $C;
+				$eps = ($t2 - $t1) * 1e-3;
+				$tp  = max($t1, min($t2, $t + $eps));
+				$A1d = array(
+					($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+					($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2d = array(
+					($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+					($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3d = array(
+					($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+					($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1d = array(
+					($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+					($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+				);
+				$B2d = array(
+					($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+					($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+				);
+				$Cd  = array(
+					($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+					($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+				);
+				$tx = $Cd[0] - $C[0];
+				$ty = $Cd[1] - $C[1];
+				$tl = sqrt($tx*$tx + $ty*$ty);
+				if($tl < 1e-9) $tl = 1;
+				$tangents[] = array($tx/$tl, $ty/$tl);
+			}
+		}
+		$N = count($samples) - 1;
+		$p_tip = $samples[$N];
+
+		$shaft_end_idx = $N;
+		for($k = $N; $k >= 0; $k--){
+			$dx = $p_tip[0] - $samples[$k][0];
+			$dy = $p_tip[1] - $samples[$k][1];
+			if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+		}
+		$tip_back     = $samples[$shaft_end_idx];
+		$tip_back_tan = $tangents[$shaft_end_idx];
+
+		$left_pts  = array();
+		$right_pts = array();
+		for($k = 0; $k <= $shaft_end_idx; $k++){
+			$nx = -$tangents[$k][1];
+			$ny =  $tangents[$k][0];
+			$bx = $samples[$k][0];
+			$by = $samples[$k][1];
+			$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+			$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+		}
+		$tn_x = -$tip_back_tan[1];
+		$tn_y =  $tip_back_tan[0];
+		$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+		$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+		$smooth = function($pts, $reverse = false){
+			$n = count($pts);
+			if($reverse) $pts = array_reverse($pts);
+			$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+			for($i = 1; $i < $n - 1; $i++){
+				$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+				$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+				$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+			}
+			$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+			return $s;
+		};
+
+		$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+		$path_d .= $smooth($left_pts);
+		$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1]);
+		$path_d .= " " . $smooth($right_pts, true);
+		$path_d .= " Z";
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- x rotation glass curved arrow F5 -> F4 -> U6 -> U5 -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		$g_in = max(2, intval($N * 0.08));
+		$gs = $g_in;
+		$ge = max($gs, $shaft_end_idx - $g_in);
+		if($ge > $gs){
+			$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+			for($k = $gs+1; $k <= $ge; $k++){
+				$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+			}
+			$svg .= "\t\t<path d=\"{$g_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+		}
+
+		return $svg;
+	}
+
+	/**
+	 * y cube rotation: glass-style curved arrow with 4 anchors.
+	 *   R5 (R centre) -> R2 (R mid-back) -> F8 (F mid-bottom) -> F5 (F centre).
+	 */
+	function gen_glass_y_rotation_arrow($ccw, $hl){
+		global $p, $dim, $F, $R, $U;
+
+		$d = $dim;
+		$sticker_centre = function($face, $r, $c) use (&$p){
+			$q00 = $p[$face][$r  ][$c  ];
+			$q10 = $p[$face][$r+1][$c  ];
+			$q11 = $p[$face][$r+1][$c+1];
+			$q01 = $p[$face][$r  ][$c+1];
+			return array(
+				($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+				($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+			);
+		};
+
+		$A0 = $sticker_centre($R, 1, 1);   // R5
+		$A1 = $sticker_centre($R, 0, 1);   // R2
+		$A2 = $sticker_centre($F, $d - 1, 1);   // F8
+		$A3 = $sticker_centre($F, 1, 1);   // F5
+
+		$anchors = array($A0, $A1, $A2, $A3);
+		if($ccw){
+			$anchors = array_reverse($anchors);
+		}
+
+		$u_BL = $p[$U][0][0];
+		$u_FR = $p[$U][$d][$d];
+		$diag_u = sqrt(
+			($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+			($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+		);
+		$sticker_w = $diag_u / $d / 1.414;
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = $thick * 1.8;
+
+		$alpha = 0.5;
+		$cr_points = array();
+		$cr_points[] = $anchors[0];
+		foreach($anchors as $a) $cr_points[] = $a;
+		$cr_points[] = $anchors[count($anchors)-1];
+
+		$N_per_seg = 24;
+		$samples  = array();
+		$tangents = array();
+		$tj = function($ti, $pi, $pj) use ($alpha){
+			$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+			$dist = sqrt($dx*$dx + $dy*$dy);
+			if($dist < 1e-9) $dist = 1e-9;
+			return $ti + pow($dist, $alpha);
+		};
+		for($i = 0; $i < count($anchors) - 1; $i++){
+			$P0 = $cr_points[$i];
+			$P1 = $cr_points[$i+1];
+			$P2 = $cr_points[$i+2];
+			$P3 = $cr_points[$i+3];
+			$t0 = 0.0;
+			$t1 = $tj($t0, $P0, $P1);
+			$t2 = $tj($t1, $P1, $P2);
+			$t3 = $tj($t2, $P2, $P3);
+			$is_last = ($i == count($anchors) - 2);
+			$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+			for($k = 0; $k <= $last_k; $k++){
+				$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+				$A1c = array(
+					($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+					($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2c = array(
+					($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+					($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3c = array(
+					($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+					($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1c = array(
+					($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+					($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+				);
+				$B2c = array(
+					($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+					($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+				);
+				$C  = array(
+					($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+					($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+				);
+				$samples[] = $C;
+				$eps = ($t2 - $t1) * 1e-3;
+				$tp  = max($t1, min($t2, $t + $eps));
+				$A1d = array(
+					($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+					($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2d = array(
+					($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+					($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3d = array(
+					($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+					($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1d = array(
+					($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+					($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+				);
+				$B2d = array(
+					($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+					($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+				);
+				$Cd  = array(
+					($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+					($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+				);
+				$tx = $Cd[0] - $C[0];
+				$ty = $Cd[1] - $C[1];
+				$tl = sqrt($tx*$tx + $ty*$ty);
+				if($tl < 1e-9) $tl = 1;
+				$tangents[] = array($tx/$tl, $ty/$tl);
+			}
+		}
+		$N = count($samples) - 1;
+		$p_tip = $samples[$N];
+
+		$shaft_end_idx = $N;
+		for($k = $N; $k >= 0; $k--){
+			$dx = $p_tip[0] - $samples[$k][0];
+			$dy = $p_tip[1] - $samples[$k][1];
+			if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+		}
+		$tip_back     = $samples[$shaft_end_idx];
+		$tip_back_tan = $tangents[$shaft_end_idx];
+
+		$left_pts  = array();
+		$right_pts = array();
+		for($k = 0; $k <= $shaft_end_idx; $k++){
+			$nx = -$tangents[$k][1];
+			$ny =  $tangents[$k][0];
+			$bx = $samples[$k][0];
+			$by = $samples[$k][1];
+			$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+			$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+		}
+		$tn_x = -$tip_back_tan[1];
+		$tn_y =  $tip_back_tan[0];
+		$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+		$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+		$smooth = function($pts, $reverse = false){
+			$n = count($pts);
+			if($reverse) $pts = array_reverse($pts);
+			$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+			for($i = 1; $i < $n - 1; $i++){
+				$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+				$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+				$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+			}
+			$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+			return $s;
+		};
+
+		$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+		$path_d .= $smooth($left_pts);
+		$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1]);
+		$path_d .= " " . $smooth($right_pts, true);
+		$path_d .= " Z";
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- y rotation glass curved arrow R5 -> R2 -> F8 -> F5 -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		$g_in = max(2, intval($N * 0.08));
+		$gs = $g_in;
+		$ge = max($gs, $shaft_end_idx - $g_in);
+		if($ge > $gs){
+			$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+			for($k = $gs+1; $k <= $ge; $k++){
+				$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+			}
+			$svg .= "\t\t<path d=\"{$g_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+		}
+
+		return $svg;
+	}
+
+	/**
+	 * z cube rotation: glass-style curved arrow with 4 anchors.
+	 *   U5 -> U8 -> R4 -> R5.
+	 */
+	function gen_glass_z_rotation_arrow($ccw, $hl){
+		global $p, $dim, $F, $R, $U;
+
+		$d = $dim;
+		$sticker_centre = function($face, $r, $c) use (&$p){
+			$q00 = $p[$face][$r  ][$c  ];
+			$q10 = $p[$face][$r+1][$c  ];
+			$q11 = $p[$face][$r+1][$c+1];
+			$q01 = $p[$face][$r  ][$c+1];
+			return array(
+				($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+				($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+			);
+		};
+
+		$A0 = $sticker_centre($U, 1, 1);        // U5
+		$A1 = $sticker_centre($U, $d - 1, 1);   // U8
+		$A2 = $sticker_centre($R, 1, 0);        // R4
+		$A3 = $sticker_centre($R, 1, 1);        // R5
+
+		$anchors = array($A0, $A1, $A2, $A3);
+		if($ccw){
+			$anchors = array_reverse($anchors);
+		}
+
+		$u_BL = $p[$U][0][0];
+		$u_FR = $p[$U][$d][$d];
+		$diag_u = sqrt(
+			($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+			($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+		);
+		$sticker_w = $diag_u / $d / 1.414;
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = $thick * 1.8;
+
+		$alpha = 0.5;
+		$cr_points = array();
+		$cr_points[] = $anchors[0];
+		foreach($anchors as $a) $cr_points[] = $a;
+		$cr_points[] = $anchors[count($anchors)-1];
+
+		$N_per_seg = 24;
+		$samples  = array();
+		$tangents = array();
+		$tj = function($ti, $pi, $pj) use ($alpha){
+			$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+			$dist = sqrt($dx*$dx + $dy*$dy);
+			if($dist < 1e-9) $dist = 1e-9;
+			return $ti + pow($dist, $alpha);
+		};
+		for($i = 0; $i < count($anchors) - 1; $i++){
+			$P0 = $cr_points[$i];
+			$P1 = $cr_points[$i+1];
+			$P2 = $cr_points[$i+2];
+			$P3 = $cr_points[$i+3];
+			$t0 = 0.0;
+			$t1 = $tj($t0, $P0, $P1);
+			$t2 = $tj($t1, $P1, $P2);
+			$t3 = $tj($t2, $P2, $P3);
+			$is_last = ($i == count($anchors) - 2);
+			$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+			for($k = 0; $k <= $last_k; $k++){
+				$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+				$A1c = array(
+					($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+					($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2c = array(
+					($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+					($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3c = array(
+					($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+					($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1c = array(
+					($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+					($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+				);
+				$B2c = array(
+					($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+					($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+				);
+				$C  = array(
+					($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+					($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+				);
+				$samples[] = $C;
+				$eps = ($t2 - $t1) * 1e-3;
+				$tp  = max($t1, min($t2, $t + $eps));
+				$A1d = array(
+					($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+					($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2d = array(
+					($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+					($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3d = array(
+					($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+					($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1d = array(
+					($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+					($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+				);
+				$B2d = array(
+					($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+					($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+				);
+				$Cd  = array(
+					($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+					($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+				);
+				$tx = $Cd[0] - $C[0];
+				$ty = $Cd[1] - $C[1];
+				$tl = sqrt($tx*$tx + $ty*$ty);
+				if($tl < 1e-9) $tl = 1;
+				$tangents[] = array($tx/$tl, $ty/$tl);
+			}
+		}
+		$N = count($samples) - 1;
+		$p_tip = $samples[$N];
+
+		$shaft_end_idx = $N;
+		for($k = $N; $k >= 0; $k--){
+			$dx = $p_tip[0] - $samples[$k][0];
+			$dy = $p_tip[1] - $samples[$k][1];
+			if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+		}
+		$tip_back     = $samples[$shaft_end_idx];
+		$tip_back_tan = $tangents[$shaft_end_idx];
+
+		$left_pts  = array();
+		$right_pts = array();
+		for($k = 0; $k <= $shaft_end_idx; $k++){
+			$nx = -$tangents[$k][1];
+			$ny =  $tangents[$k][0];
+			$bx = $samples[$k][0];
+			$by = $samples[$k][1];
+			$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+			$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+		}
+		$tn_x = -$tip_back_tan[1];
+		$tn_y =  $tip_back_tan[0];
+		$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+		$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+		$smooth = function($pts, $reverse = false){
+			$n = count($pts);
+			if($reverse) $pts = array_reverse($pts);
+			$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+			for($i = 1; $i < $n - 1; $i++){
+				$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+				$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+				$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+			}
+			$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+			return $s;
+		};
+
+		$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+		$path_d .= $smooth($left_pts);
+		$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1]);
+		$path_d .= " " . $smooth($right_pts, true);
+		$path_d .= " Z";
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- z rotation glass curved arrow U5 -> U8 -> R4 -> R5 -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		$g_in = max(2, intval($N * 0.08));
+		$gs = $g_in;
+		$ge = max($gs, $shaft_end_idx - $g_in);
+		if($ge > $gs){
+			$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+			for($k = $gs+1; $k <= $ge; $k++){
+				$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+			}
+			$svg .= "\t\t<path d=\"{$g_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+		}
+
+		return $svg;
+	}
+
+	/**
+	 * M slice move: glass-style curved arrow with 4 anchors.
+	 *   U4 -> U6 -> F4 -> F5.
+	 */
+	function gen_glass_m_slice_arrow($ccw, $hl){
+		global $p, $dim, $F, $R, $U;
+
+		$d = $dim;
+		$sticker_centre = function($face, $r, $c) use (&$p){
+			$q00 = $p[$face][$r  ][$c  ];
+			$q10 = $p[$face][$r+1][$c  ];
+			$q11 = $p[$face][$r+1][$c+1];
+			$q01 = $p[$face][$r  ][$c+1];
+			return array(
+				($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+				($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+			);
+		};
+
+		$A0 = $sticker_centre($U, 1, 0);        // U4
+		$A1 = $sticker_centre($U, 1, $d - 1);   // U6
+		$A2 = $sticker_centre($F, 1, 0);        // F4
+		$A3 = $sticker_centre($F, 1, 1);        // F5
+
+		$anchors = array($A0, $A1, $A2, $A3);
+		if($ccw){
+			$anchors = array_reverse($anchors);
+		}
+
+		$u_BL = $p[$U][0][0];
+		$u_FR = $p[$U][$d][$d];
+		$diag_u = sqrt(
+			($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+			($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+		);
+		$sticker_w = $diag_u / $d / 1.414;
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = $thick * 1.8;
+
+		$alpha = 0.5;
+		$cr_points = array();
+		$cr_points[] = $anchors[0];
+		foreach($anchors as $a) $cr_points[] = $a;
+		$cr_points[] = $anchors[count($anchors)-1];
+
+		$N_per_seg = 24;
+		$samples  = array();
+		$tangents = array();
+		$tj = function($ti, $pi, $pj) use ($alpha){
+			$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+			$dist = sqrt($dx*$dx + $dy*$dy);
+			if($dist < 1e-9) $dist = 1e-9;
+			return $ti + pow($dist, $alpha);
+		};
+		for($i = 0; $i < count($anchors) - 1; $i++){
+			$P0 = $cr_points[$i];
+			$P1 = $cr_points[$i+1];
+			$P2 = $cr_points[$i+2];
+			$P3 = $cr_points[$i+3];
+			$t0 = 0.0;
+			$t1 = $tj($t0, $P0, $P1);
+			$t2 = $tj($t1, $P1, $P2);
+			$t3 = $tj($t2, $P2, $P3);
+			$is_last = ($i == count($anchors) - 2);
+			$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+			for($k = 0; $k <= $last_k; $k++){
+				$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+				$A1c = array(
+					($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+					($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2c = array(
+					($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+					($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3c = array(
+					($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+					($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1c = array(
+					($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+					($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+				);
+				$B2c = array(
+					($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+					($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+				);
+				$C  = array(
+					($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+					($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+				);
+				$samples[] = $C;
+				$eps = ($t2 - $t1) * 1e-3;
+				$tp  = max($t1, min($t2, $t + $eps));
+				$A1d = array(
+					($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+					($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2d = array(
+					($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+					($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3d = array(
+					($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+					($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1d = array(
+					($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+					($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+				);
+				$B2d = array(
+					($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+					($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+				);
+				$Cd  = array(
+					($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+					($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+				);
+				$tx = $Cd[0] - $C[0];
+				$ty = $Cd[1] - $C[1];
+				$tl = sqrt($tx*$tx + $ty*$ty);
+				if($tl < 1e-9) $tl = 1;
+				$tangents[] = array($tx/$tl, $ty/$tl);
+			}
+		}
+		$N = count($samples) - 1;
+		$p_tip = $samples[$N];
+
+		$shaft_end_idx = $N;
+		for($k = $N; $k >= 0; $k--){
+			$dx = $p_tip[0] - $samples[$k][0];
+			$dy = $p_tip[1] - $samples[$k][1];
+			if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+		}
+		$tip_back     = $samples[$shaft_end_idx];
+		$tip_back_tan = $tangents[$shaft_end_idx];
+
+		$left_pts  = array();
+		$right_pts = array();
+		for($k = 0; $k <= $shaft_end_idx; $k++){
+			$nx = -$tangents[$k][1];
+			$ny =  $tangents[$k][0];
+			$bx = $samples[$k][0];
+			$by = $samples[$k][1];
+			$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+			$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+		}
+		$tn_x = -$tip_back_tan[1];
+		$tn_y =  $tip_back_tan[0];
+		$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+		$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+		$smooth = function($pts, $reverse = false){
+			$n = count($pts);
+			if($reverse) $pts = array_reverse($pts);
+			$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+			for($i = 1; $i < $n - 1; $i++){
+				$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+				$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+				$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+			}
+			$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+			return $s;
+		};
+
+		$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+		$path_d .= $smooth($left_pts);
+		$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1]);
+		$path_d .= " " . $smooth($right_pts, true);
+		$path_d .= " Z";
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- M slice arrow U4 -> U6 -> F4 -> F5 -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		$g_in = max(2, intval($N * 0.08));
+		$gs = $g_in;
+		$ge = max($gs, $shaft_end_idx - $g_in);
+		if($ge > $gs){
+			$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+			for($k = $gs+1; $k <= $ge; $k++){
+				$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+			}
+			$svg .= "\t\t<path d=\"{$g_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+		}
+
+		return $svg;
+	}
+
+	/**
+	 * E slice move: glass-style curved arrow with 4 anchors.
+	 *   F2 -> F8 -> R2 -> R5.
+	 */
+	function gen_glass_e_slice_arrow($ccw, $hl){
+		global $p, $dim, $F, $R, $U;
+
+		$d = $dim;
+		$sticker_centre = function($face, $r, $c) use (&$p){
+			$q00 = $p[$face][$r  ][$c  ];
+			$q10 = $p[$face][$r+1][$c  ];
+			$q11 = $p[$face][$r+1][$c+1];
+			$q01 = $p[$face][$r  ][$c+1];
+			return array(
+				($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+				($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+			);
+		};
+
+		$A0 = $sticker_centre($F, 0, 1);        // F2
+		$A1 = $sticker_centre($F, $d - 1, 1);   // F8
+		$A2 = $sticker_centre($R, 0, 1);        // R2
+		$A3 = $sticker_centre($R, 1, 1);        // R5
+
+		$anchors = array($A0, $A1, $A2, $A3);
+		if($ccw){
+			$anchors = array_reverse($anchors);
+		}
+
+		$u_BL = $p[$U][0][0];
+		$u_FR = $p[$U][$d][$d];
+		$diag_u = sqrt(
+			($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+			($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+		);
+		$sticker_w = $diag_u / $d / 1.414;
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = $thick * 1.8;
+
+		$alpha = 0.5;
+		$cr_points = array();
+		$cr_points[] = $anchors[0];
+		foreach($anchors as $a) $cr_points[] = $a;
+		$cr_points[] = $anchors[count($anchors)-1];
+
+		$N_per_seg = 24;
+		$samples  = array();
+		$tangents = array();
+		$tj = function($ti, $pi, $pj) use ($alpha){
+			$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+			$dist = sqrt($dx*$dx + $dy*$dy);
+			if($dist < 1e-9) $dist = 1e-9;
+			return $ti + pow($dist, $alpha);
+		};
+		for($i = 0; $i < count($anchors) - 1; $i++){
+			$P0 = $cr_points[$i];
+			$P1 = $cr_points[$i+1];
+			$P2 = $cr_points[$i+2];
+			$P3 = $cr_points[$i+3];
+			$t0 = 0.0;
+			$t1 = $tj($t0, $P0, $P1);
+			$t2 = $tj($t1, $P1, $P2);
+			$t3 = $tj($t2, $P2, $P3);
+			$is_last = ($i == count($anchors) - 2);
+			$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+			for($k = 0; $k <= $last_k; $k++){
+				$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+				$A1c = array(
+					($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+					($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2c = array(
+					($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+					($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3c = array(
+					($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+					($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1c = array(
+					($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+					($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+				);
+				$B2c = array(
+					($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+					($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+				);
+				$C  = array(
+					($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+					($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+				);
+				$samples[] = $C;
+				$eps = ($t2 - $t1) * 1e-3;
+				$tp  = max($t1, min($t2, $t + $eps));
+				$A1d = array(
+					($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+					($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2d = array(
+					($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+					($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3d = array(
+					($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+					($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1d = array(
+					($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+					($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+				);
+				$B2d = array(
+					($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+					($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+				);
+				$Cd  = array(
+					($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+					($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+				);
+				$tx = $Cd[0] - $C[0];
+				$ty = $Cd[1] - $C[1];
+				$tl = sqrt($tx*$tx + $ty*$ty);
+				if($tl < 1e-9) $tl = 1;
+				$tangents[] = array($tx/$tl, $ty/$tl);
+			}
+		}
+		$N = count($samples) - 1;
+		$p_tip = $samples[$N];
+
+		$shaft_end_idx = $N;
+		for($k = $N; $k >= 0; $k--){
+			$dx = $p_tip[0] - $samples[$k][0];
+			$dy = $p_tip[1] - $samples[$k][1];
+			if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+		}
+		$tip_back     = $samples[$shaft_end_idx];
+		$tip_back_tan = $tangents[$shaft_end_idx];
+
+		$left_pts  = array();
+		$right_pts = array();
+		for($k = 0; $k <= $shaft_end_idx; $k++){
+			$nx = -$tangents[$k][1];
+			$ny =  $tangents[$k][0];
+			$bx = $samples[$k][0];
+			$by = $samples[$k][1];
+			$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+			$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+		}
+		$tn_x = -$tip_back_tan[1];
+		$tn_y =  $tip_back_tan[0];
+		$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+		$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+		$smooth = function($pts, $reverse = false){
+			$n = count($pts);
+			if($reverse) $pts = array_reverse($pts);
+			$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+			for($i = 1; $i < $n - 1; $i++){
+				$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+				$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+				$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+			}
+			$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+			return $s;
+		};
+
+		$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+		$path_d .= $smooth($left_pts);
+		$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1]);
+		$path_d .= " " . $smooth($right_pts, true);
+		$path_d .= " Z";
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- E slice arrow F2 -> F8 -> R2 -> R5 -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		$g_in = max(2, intval($N * 0.08));
+		$gs = $g_in;
+		$ge = max($gs, $shaft_end_idx - $g_in);
+		if($ge > $gs){
+			$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+			for($k = $gs+1; $k <= $ge; $k++){
+				$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+			}
+			$svg .= "\t\t<path d=\"{$g_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+		}
+
+		return $svg;
+	}
+
+	/**
+	 * S slice move: glass-style curved arrow with 4 anchors.
+	 *   U2 -> U8 -> R4 -> R5.
+	 */
+	function gen_glass_s_slice_arrow($ccw, $hl){
+		global $p, $dim, $F, $R, $U;
+
+		$d = $dim;
+		$sticker_centre = function($face, $r, $c) use (&$p){
+			$q00 = $p[$face][$r  ][$c  ];
+			$q10 = $p[$face][$r+1][$c  ];
+			$q11 = $p[$face][$r+1][$c+1];
+			$q01 = $p[$face][$r  ][$c+1];
+			return array(
+				($q00[0] + $q10[0] + $q11[0] + $q01[0]) / 4,
+				($q00[1] + $q10[1] + $q11[1] + $q01[1]) / 4
+			);
+		};
+
+		$A0 = $sticker_centre($U, 0, 1);        // U2
+		$A1 = $sticker_centre($U, $d - 1, 1);   // U8
+		$A2 = $sticker_centre($R, 1, 0);        // R4
+		$A3 = $sticker_centre($R, 1, 1);        // R5
+
+		$anchors = array($A0, $A1, $A2, $A3);
+		if($ccw){
+			$anchors = array_reverse($anchors);
+		}
+
+		$u_BL = $p[$U][0][0];
+		$u_FR = $p[$U][$d][$d];
+		$diag_u = sqrt(
+			($u_BL[0]-$u_FR[0])*($u_BL[0]-$u_FR[0]) +
+			($u_BL[1]-$u_FR[1])*($u_BL[1]-$u_FR[1])
+		);
+		$sticker_w = $diag_u / $d / 1.414;
+		$thick    = $sticker_w * 0.55;
+		$half_t   = $thick / 2;
+		$head_w   = $thick * 1.6;
+		$head_len = $thick * 1.8;
+
+		$alpha = 0.5;
+		$cr_points = array();
+		$cr_points[] = $anchors[0];
+		foreach($anchors as $a) $cr_points[] = $a;
+		$cr_points[] = $anchors[count($anchors)-1];
+
+		$N_per_seg = 24;
+		$samples  = array();
+		$tangents = array();
+		$tj = function($ti, $pi, $pj) use ($alpha){
+			$dx = $pj[0]-$pi[0]; $dy = $pj[1]-$pi[1];
+			$dist = sqrt($dx*$dx + $dy*$dy);
+			if($dist < 1e-9) $dist = 1e-9;
+			return $ti + pow($dist, $alpha);
+		};
+		for($i = 0; $i < count($anchors) - 1; $i++){
+			$P0 = $cr_points[$i];
+			$P1 = $cr_points[$i+1];
+			$P2 = $cr_points[$i+2];
+			$P3 = $cr_points[$i+3];
+			$t0 = 0.0;
+			$t1 = $tj($t0, $P0, $P1);
+			$t2 = $tj($t1, $P1, $P2);
+			$t3 = $tj($t2, $P2, $P3);
+			$is_last = ($i == count($anchors) - 2);
+			$last_k = $is_last ? $N_per_seg : $N_per_seg - 1;
+			for($k = 0; $k <= $last_k; $k++){
+				$t = $t1 + ($t2 - $t1) * ($k / $N_per_seg);
+				$A1c = array(
+					($t1-$t)/($t1-$t0)*$P0[0] + ($t-$t0)/($t1-$t0)*$P1[0],
+					($t1-$t)/($t1-$t0)*$P0[1] + ($t-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2c = array(
+					($t2-$t)/($t2-$t1)*$P1[0] + ($t-$t1)/($t2-$t1)*$P2[0],
+					($t2-$t)/($t2-$t1)*$P1[1] + ($t-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3c = array(
+					($t3-$t)/($t3-$t2)*$P2[0] + ($t-$t2)/($t3-$t2)*$P3[0],
+					($t3-$t)/($t3-$t2)*$P2[1] + ($t-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1c = array(
+					($t2-$t)/($t2-$t0)*$A1c[0] + ($t-$t0)/($t2-$t0)*$A2c[0],
+					($t2-$t)/($t2-$t0)*$A1c[1] + ($t-$t0)/($t2-$t0)*$A2c[1]
+				);
+				$B2c = array(
+					($t3-$t)/($t3-$t1)*$A2c[0] + ($t-$t1)/($t3-$t1)*$A3c[0],
+					($t3-$t)/($t3-$t1)*$A2c[1] + ($t-$t1)/($t3-$t1)*$A3c[1]
+				);
+				$C  = array(
+					($t2-$t)/($t2-$t1)*$B1c[0] + ($t-$t1)/($t2-$t1)*$B2c[0],
+					($t2-$t)/($t2-$t1)*$B1c[1] + ($t-$t1)/($t2-$t1)*$B2c[1]
+				);
+				$samples[] = $C;
+				$eps = ($t2 - $t1) * 1e-3;
+				$tp  = max($t1, min($t2, $t + $eps));
+				$A1d = array(
+					($t1-$tp)/($t1-$t0)*$P0[0] + ($tp-$t0)/($t1-$t0)*$P1[0],
+					($t1-$tp)/($t1-$t0)*$P0[1] + ($tp-$t0)/($t1-$t0)*$P1[1]
+				);
+				$A2d = array(
+					($t2-$tp)/($t2-$t1)*$P1[0] + ($tp-$t1)/($t2-$t1)*$P2[0],
+					($t2-$tp)/($t2-$t1)*$P1[1] + ($tp-$t1)/($t2-$t1)*$P2[1]
+				);
+				$A3d = array(
+					($t3-$tp)/($t3-$t2)*$P2[0] + ($tp-$t2)/($t3-$t2)*$P3[0],
+					($t3-$tp)/($t3-$t2)*$P2[1] + ($tp-$t2)/($t3-$t2)*$P3[1]
+				);
+				$B1d = array(
+					($t2-$tp)/($t2-$t0)*$A1d[0] + ($tp-$t0)/($t2-$t0)*$A2d[0],
+					($t2-$tp)/($t2-$t0)*$A1d[1] + ($tp-$t0)/($t2-$t0)*$A2d[1]
+				);
+				$B2d = array(
+					($t3-$tp)/($t3-$t1)*$A2d[0] + ($tp-$t1)/($t3-$t1)*$A3d[0],
+					($t3-$tp)/($t3-$t1)*$A2d[1] + ($tp-$t1)/($t3-$t1)*$A3d[1]
+				);
+				$Cd  = array(
+					($t2-$tp)/($t2-$t1)*$B1d[0] + ($tp-$t1)/($t2-$t1)*$B2d[0],
+					($t2-$tp)/($t2-$t1)*$B1d[1] + ($tp-$t1)/($t2-$t1)*$B2d[1]
+				);
+				$tx = $Cd[0] - $C[0];
+				$ty = $Cd[1] - $C[1];
+				$tl = sqrt($tx*$tx + $ty*$ty);
+				if($tl < 1e-9) $tl = 1;
+				$tangents[] = array($tx/$tl, $ty/$tl);
+			}
+		}
+		$N = count($samples) - 1;
+		$p_tip = $samples[$N];
+
+		$shaft_end_idx = $N;
+		for($k = $N; $k >= 0; $k--){
+			$dx = $p_tip[0] - $samples[$k][0];
+			$dy = $p_tip[1] - $samples[$k][1];
+			if(sqrt($dx*$dx + $dy*$dy) >= $head_len){ $shaft_end_idx = $k; break; }
+		}
+		$tip_back     = $samples[$shaft_end_idx];
+		$tip_back_tan = $tangents[$shaft_end_idx];
+
+		$left_pts  = array();
+		$right_pts = array();
+		for($k = 0; $k <= $shaft_end_idx; $k++){
+			$nx = -$tangents[$k][1];
+			$ny =  $tangents[$k][0];
+			$bx = $samples[$k][0];
+			$by = $samples[$k][1];
+			$left_pts[]  = array($bx + $nx*$half_t, $by + $ny*$half_t);
+			$right_pts[] = array($bx - $nx*$half_t, $by - $ny*$half_t);
+		}
+		$tn_x = -$tip_back_tan[1];
+		$tn_y =  $tip_back_tan[0];
+		$base_l = array($tip_back[0] + $tn_x*$head_w, $tip_back[1] + $tn_y*$head_w);
+		$base_r = array($tip_back[0] - $tn_x*$head_w, $tip_back[1] - $tn_y*$head_w);
+
+		$smooth = function($pts, $reverse = false){
+			$n = count($pts);
+			if($reverse) $pts = array_reverse($pts);
+			$s = sprintf("L %.3f,%.3f", $pts[0][0], $pts[0][1]);
+			for($i = 1; $i < $n - 1; $i++){
+				$mx = ($pts[$i][0] + $pts[$i+1][0]) / 2;
+				$my = ($pts[$i][1] + $pts[$i+1][1]) / 2;
+				$s .= sprintf(" Q %.3f,%.3f %.3f,%.3f", $pts[$i][0], $pts[$i][1], $mx, $my);
+			}
+			$s .= sprintf(" L %.3f,%.3f", $pts[$n-1][0], $pts[$n-1][1]);
+			return $s;
+		};
+
+		$path_d  = sprintf("M %.3f,%.3f ", $left_pts[0][0], $left_pts[0][1]);
+		$path_d .= $smooth($left_pts);
+		$path_d .= sprintf(" L %.3f,%.3f L %.3f,%.3f L %.3f,%.3f",
+			$base_l[0], $base_l[1],
+			$p_tip[0],  $p_tip[1],
+			$base_r[0], $base_r[1]);
+		$path_d .= " " . $smooth($right_pts, true);
+		$path_d .= " Z";
+
+		$stroke_w = $thick * 0.30;
+		$gloss_w  = $thick * 0.18;
+
+		$svg  = "\t\t<!-- S slice arrow U2 -> U8 -> R4 -> R5 -->\n";
+		$svg .= "\t\t<path d=\"{$path_d}\"\n";
+		$svg .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+		$g_in = max(2, intval($N * 0.08));
+		$gs = $g_in;
+		$ge = max($gs, $shaft_end_idx - $g_in);
+		if($ge > $gs){
+			$g_d = sprintf("M %.3f,%.3f", $samples[$gs][0], $samples[$gs][1]);
+			for($k = $gs+1; $k <= $ge; $k++){
+				$g_d .= sprintf(" L %.3f,%.3f", $samples[$k][0], $samples[$k][1]);
+			}
+			$svg .= "\t\t<path d=\"{$g_d}\"\n";
+			$svg .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linecap:round\"/>\n";
+		}
+
+		return $svg;
+	}
+	function gen_move_arrow($face, $ccw, $col, $double = false, $bulge = 0.5, $hl = false, $kind = ''){
 		global $p, $dim, $rv, $U, $R, $F, $D, $L, $B;
 
 		if($col == 't') return '';
+
+		// --- Cube rotation arrows (x / y / z) ---
+		if(!$double && $kind === 'x'){
+			return gen_glass_x_rotation_arrow($ccw, $hl);
+		}
+		if(!$double && $kind === 'y'){
+			return gen_glass_y_rotation_arrow($ccw, $hl);
+		}
+		if(!$double && $kind === 'z'){
+			return gen_glass_z_rotation_arrow($ccw, $hl);
+		}
+		if(!$double && $kind === 'M'){
+			return gen_glass_m_slice_arrow($ccw, $hl);
+		}
+		if(!$double && $kind === 'E'){
+			return gen_glass_e_slice_arrow($ccw, $hl);
+		}
+		if(!$double && $kind === 'S'){
+			return gen_glass_s_slice_arrow($ccw, $hl);
+		}
+
+		// --- Wrapping glass arrow for U move: spans top row of L + top row of F ---
+		if(!$double && $face == $U){
+			return gen_glass_u_wrap_arrow($ccw, $hl);
+		}
+		// --- Half-circle glass arrow for F face (projected onto face) ---
+		if(!$double && $face == $F){
+			return gen_glass_arc_arrow_face('F', $ccw, $hl);
+		}
+		// --- Wrapping glass arrow for B move: spans back row of U + back column of R ---
+		if(!$double && $face == $B){
+			return gen_glass_b_wrap_arrow($ccw, $hl);
+		}
+		// --- Wrapping straight glass arrow for D move: spans bottom row of F + bottom row of R ---
+		if(!$double && $face == $D){
+			return gen_glass_d_wrap_arrow($ccw, $hl);
+		}
+		// --- L/R move: vertical glass arrow on F's left or right column ---
+		if(!$double && ($face == $L || $face == $R)){
+			return gen_glass_lr_column_arrow($face == $L ? 'L' : 'R', $ccw, $hl);
+		}
+		// --- (Legacy straight on-face arrow, kept for reference but unreached) ---
+		if(false && !$double && ($face == $L || $face == $R)){
+			// 4 face edges (pairs of corners, in order around the face)
+			$corners4 = Array(
+				array($p[$face][0][0],       $p[$face][$dim][0]),
+				array($p[$face][$dim][0],    $p[$face][$dim][$dim]),
+				array($p[$face][$dim][$dim], $p[$face][0][$dim]),
+				array($p[$face][0][$dim],    $p[$face][0][0]),
+			);
+
+			// Pick the visible outer edge per face:
+			//   L → leftmost edge of L face  (min X) — outer left silhouette
+			//   R → leftmost edge of R face  (min X) — front-shared edge with F
+			$best = 0;
+			if($face == $L){
+				$best_v = 1e9;
+				foreach($corners4 as $i => $e){ $v = ($e[0][0]+$e[1][0])/2; if($v < $best_v){ $best_v=$v; $best=$i; } }
+			} else { // R
+				$best_v = 1e9;
+				foreach($corners4 as $i => $e){ $v = ($e[0][0]+$e[1][0])/2; if($v < $best_v){ $best_v=$v; $best=$i; } }
+			}
+			$e = $corners4[$best];
+
+			// CW direction along the outer edge:
+			//   L (CW) = downward (top→bottom)
+			//   R (CW) = upward   (bottom→top)
+			$lo = ($e[0][1] < $e[1][1]) ? $e[0] : $e[1]; // top
+			$hi = ($e[0][1] < $e[1][1]) ? $e[1] : $e[0]; // bottom
+			if($face == $L){ $cw_start = $lo; $cw_end = $hi; }
+			else           { $cw_start = $hi; $cw_end = $lo; }
+
+			if(!$ccw){ $sx=$cw_start[0]; $sy=$cw_start[1]; $ex=$cw_end[0];   $ey=$cw_end[1]; }
+			else     { $sx=$cw_end[0];   $sy=$cw_end[1];   $ex=$cw_start[0]; $ey=$cw_start[1]; }
+
+			// Shrink endpoints a bit so the arrow doesn't touch the corners
+			$dx = $ex - $sx; $dy = $ey - $sy;
+			$len = sqrt($dx*$dx + $dy*$dy);
+			$shrink = 0.12;
+			$sx += $dx * $shrink;  $sy += $dy * $shrink;
+			$ex -= $dx * $shrink;  $ey -= $dy * $shrink;
+
+			$tx = ($ex - $sx) / $len;  $ty = ($ey - $sy) / $len;
+			$sw = $len * 0.10;
+			$head_len = $len * 0.18;
+			$head_w   = $len * 0.10;
+
+			// Straight arrow = bezier with control point at midpoint
+			$qx = ($sx + $ex) / 2;  $qy = ($sy + $ey) / 2;
+
+			$svg = "\t\t<!-- straight move arrow face=$face -->\n";
+			$svg .= gen_move_arrow_bez($sx, $sy, $qx, $qy, $ex, $ey, $sw, $col, $tx, $ty, $head_len, $head_w, $hl);
+			return $svg;
+		}
 
 		$back_face = ($face == $D || $face == $L || $face == $B);
 
@@ -1091,19 +3903,108 @@
 		$travel = atan2($ty, $tx);
 		$perp   = $travel + M_PI/2;
 
+		// Detect straight arrow: control point at (or very near) the segment midpoint
+		$mx = ($sx + $ex) / 2;  $my = ($sy + $ey) / 2;
+		$dq = sqrt(($qx-$mx)*($qx-$mx) + ($qy-$my)*($qy-$my));
+		$seg = sqrt(($ex-$sx)*($ex-$sx) + ($ey-$sy)*($ey-$sy));
+		$is_straight = ($dq < $seg * 0.02);
+
 		$out = '';
 
+		// --- Glass-style straight arrow: single closed polygon with gradient + gloss ---
+		if($hl && $is_straight && $has_head){
+			static $grad_id = 0;
+			$grad_id++;
+			$gid = "arrowGlass{$grad_id}";
+
+			$half_sw = $sw / 2;
+			// Shaft direction unit vector
+			$ux = $tx; $uy = $ty;
+			// Perpendicular unit vector
+			$px = cos($perp); $py = sin($perp);
+
+			// Arrow polygon points (start at tail-left, go around clockwise):
+			//   tail_L  ─────────  shoulder_L
+			//                          │
+			//                          base_L
+			//                          \
+			//                           tip
+			//                          /
+			//                          base_R
+			//                          │
+			//   tail_R  ─────────  shoulder_R
+			$tail_L = array($sx + $px*$half_sw, $sy + $py*$half_sw);
+			$tail_R = array($sx - $px*$half_sw, $sy - $py*$half_sw);
+			// Shoulder = where shaft meets arrowhead base, just before $ex
+			$shoulder_L = array($ex + $px*$half_sw, $ey + $py*$half_sw);
+			$shoulder_R = array($ex - $px*$half_sw, $ey - $py*$half_sw);
+			// Arrowhead base corners (wider than shaft)
+			$base_L = array($ex + $px*$head_w, $ey + $py*$head_w);
+			$base_R = array($ex - $px*$head_w, $ey - $py*$head_w);
+			// Tip
+			$tip = array($ex + $ux*$head_len, $ey + $uy*$head_len);
+
+			$pts = sprintf("%.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f",
+				$tail_L[0], $tail_L[1],
+				$shoulder_L[0], $shoulder_L[1],
+				$base_L[0], $base_L[1],
+				$tip[0], $tip[1],
+				$base_R[0], $base_R[1],
+				$shoulder_R[0], $shoulder_R[1],
+				$tail_R[0], $tail_R[1]
+			);
+
+			// Gradient direction: perpendicular to shaft (so gloss runs across the arrow width)
+			$bbox_min_x = min($tail_L[0],$tail_R[0],$base_L[0],$base_R[0],$tip[0]);
+			$bbox_max_x = max($tail_L[0],$tail_R[0],$base_L[0],$base_R[0],$tip[0]);
+			$bbox_min_y = min($tail_L[1],$tail_R[1],$base_L[1],$base_R[1],$tip[1]);
+			$bbox_max_y = max($tail_L[1],$tail_R[1],$base_L[1],$base_R[1],$tip[1]);
+			$gx1 = $bbox_min_x; $gy1 = $bbox_min_y;
+			$gx2 = $bbox_max_x; $gy2 = $bbox_max_y;
+
+			$stroke_w = $sw * 0.30;
+			$gloss_w  = $sw * 0.18;
+
+			// Solid single-color gray fill (no gradient → no halved appearance)
+			$out .= "\t\t<polygon points=\"{$pts}\"\n";
+			$out .= "\t\t\tstyle=\"fill:#aaaaaa;stroke:#000000;stroke-width:{$stroke_w};stroke-linejoin:round\"/>\n";
+
+			// Inset gloss highlight: shrunk version of the polygon, white stroke at 50% opacity
+			// Offset each point inward by ~ stroke_w toward the polygon centroid
+			$cx = ($bbox_min_x + $bbox_max_x) / 2;
+			$cy = ($bbox_min_y + $bbox_max_y) / 2;
+			$shrink = $sw * 0.18;
+			$shrink_pt = function($p) use ($cx, $cy, $shrink) {
+				$dx = $cx - $p[0]; $dy = $cy - $p[1];
+				$d = sqrt($dx*$dx+$dy*$dy);
+				if($d < 1e-9) return $p;
+				return array($p[0] + $dx/$d * $shrink, $p[1] + $dy/$d * $shrink);
+			};
+			$g_tail_L = $shrink_pt($tail_L);
+			$g_shoulder_L = $shrink_pt($shoulder_L);
+			$g_base_L = $shrink_pt($base_L);
+			$g_tip = $shrink_pt($tip);
+			$g_base_R = $shrink_pt($base_R);
+			$g_shoulder_R = $shrink_pt($shoulder_R);
+			$g_tail_R = $shrink_pt($tail_R);
+			$gpts = sprintf("%.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f",
+				$g_tail_L[0],$g_tail_L[1], $g_shoulder_L[0],$g_shoulder_L[1],
+				$g_base_L[0],$g_base_L[1], $g_tip[0],$g_tip[1],
+				$g_base_R[0],$g_base_R[1], $g_shoulder_R[0],$g_shoulder_R[1],
+				$g_tail_R[0],$g_tail_R[1]
+			);
+			$out .= "\t\t<polygon points=\"{$gpts}\"\n";
+			$out .= "\t\t\tstyle=\"fill:none;stroke:#ffffff;stroke-width:{$gloss_w};stroke-opacity:0.55;stroke-linejoin:round\"/>\n";
+
+			return $out;
+		}
+
 		if($hl){
-			// --- Highlight effect: dark thick outline, then lighter thinner overlay ---
+			// --- Highlight effect for curved arrows: dark thick outline + colored fill + sheen ---
 			// Parse base color
 			$r = hexdec(substr($col, 0, 2));
 			$g = hexdec(substr($col, 2, 2));
 			$b = hexdec(substr($col, 4, 2));
-			// Dark outline color: mix 30% of original + 70% black
-			$dr = (int)round($r * 0.30);
-			$dg = (int)round($g * 0.30);
-			$db = (int)round($b * 0.30);
-			$dark_col = sprintf('%02x%02x%02x', $dr, $dg, $db);
 			// Light overlay color: mix 60% original + 40% white
 			$lr = (int)round($r * 0.60 + 255 * 0.40);
 			$lg = (int)round($g * 0.60 + 255 * 0.40);
@@ -1112,32 +4013,27 @@
 
 			$sw_outline = $sw * 2.0;
 			$sw_inner   = $sw * 1.0;
+			$head_outline_w = ($sw_outline - $sw_inner) / 2;
 
-			// Pass 1: thick black outline
+			// Pass 1: thick black outline (path)
 			$out .= "\t\t<path d=\"M {$sx},{$sy} Q {$qx},{$qy} {$ex},{$ey}\"\n";
-			$out .= "\t\t\tstyle=\"fill:none;stroke:#000000;stroke-width:{$sw_outline};stroke-linecap:round;stroke-opacity:1\"/>\n";
-			if($has_head){
-				$tip_x = $ex + $tx * $head_len * 1.15;
-				$tip_y = $ey + $ty * $head_len * 1.15;
-				$b1x = $ex + cos($perp)*$head_w*1.4;  $b1y = $ey + sin($perp)*$head_w*1.4;
-				$b2x = $ex - cos($perp)*$head_w*1.4;  $b2y = $ey - sin($perp)*$head_w*1.4;
-				$out .= "\t\t<polygon points=\"{$tip_x},{$tip_y} {$b1x},{$b1y} {$b2x},{$b2y}\"\n";
-				$out .= "\t\t\tstyle=\"fill:#000000;stroke:none;opacity:1\"/>\n";
-			}
+			$out .= "\t\t\tstyle=\"fill:none;stroke:#000000;stroke-width:{$sw_outline};stroke-linecap:round;stroke-linejoin:round\"/>\n";
 
-			// Pass 2: thinner light overlay on top
+			// Pass 2: colored inner stroke
 			$out .= "\t\t<path d=\"M {$sx},{$sy} Q {$qx},{$qy} {$ex},{$ey}\"\n";
-			$out .= "\t\t\tstyle=\"fill:none;stroke:#{$col};stroke-width:{$sw_inner};stroke-linecap:round;stroke-opacity:1\"/>\n";
+			$out .= "\t\t\tstyle=\"fill:none;stroke:#{$col};stroke-width:{$sw_inner};stroke-linecap:round;stroke-linejoin:round\"/>\n";
+
+			// Pass 3: arrowhead with both fill and a black stroke
 			if($has_head){
 				$tip_x = $ex + $tx * $head_len;
 				$tip_y = $ey + $ty * $head_len;
 				$b1x = $ex + cos($perp)*$head_w;  $b1y = $ey + sin($perp)*$head_w;
 				$b2x = $ex - cos($perp)*$head_w;  $b2y = $ey - sin($perp)*$head_w;
 				$out .= "\t\t<polygon points=\"{$tip_x},{$tip_y} {$b1x},{$b1y} {$b2x},{$b2y}\"\n";
-				$out .= "\t\t\tstyle=\"fill:#{$col};stroke:none;opacity:1\"/>\n";
+				$out .= "\t\t\tstyle=\"fill:#{$col};stroke:#000000;stroke-width:{$head_outline_w};stroke-linejoin:round;stroke-linecap:round\"/>\n";
 			}
 
-			// Pass 3: thin light sheen streak on top (upper-left-ish)
+			// Pass 4: thin light sheen streak on top
 			$out .= "\t\t<path d=\"M {$sx},{$sy} Q {$qx},{$qy} {$ex},{$ey}\"\n";
 			$out .= "\t\t\tstyle=\"fill:none;stroke:#{$light_col};stroke-width:" . ($sw_inner * 0.35) . ";stroke-linecap:round;stroke-opacity:0.75\"/>\n";
 		} else {
